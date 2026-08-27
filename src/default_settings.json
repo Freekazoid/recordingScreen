@@ -1,0 +1,17 @@
+{
+  "transcription_engine": "whisperx",
+  "diarization_method": "diarize",
+  "compute_device": "auto",
+  "enable_transcription": true,
+  "enable_diarization": true,
+  "include_timecodes": false,
+  "debug_mode": false,
+  "expected_speakers": "",
+  "min_speakers": "",
+  "max_speakers": "",
+  "output_format": "mp4",
+  "video_quality": "Хорошее (CRF 23)",
+  "audio_track_mode": "Как есть (без пережатия)",
+  "models_dir": "",
+  "output_dir": ""
+}

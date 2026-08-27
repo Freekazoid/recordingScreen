@@ -1,0 +1,138 @@
+# .github/workflows/ - intentionally tracked
+.hf_token
+settings.json
+opencode.json
+AGENTS.md
+
+# Локальные бинарники ffmpeg (скачиваются CI/build_windows.sh при сборке)
+bin/windows/
+bin/linux/
+bin/macos/
+
+[file name]: .gitignore
+[file content begin]
+test/
+.temp_postprocess/
+.temp_segments/
+
+# Артефакты тестов и записи
+audio.wav
+output.mkv
+test_*.wav
+test_*.txt
+output/
+logs/
+squashfs-root/
+src/_build_version.py
+models/
+*.spec
+
+# ========== Python ==========
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ========== Virtual Environment ==========
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# ========== Local build runtime ==========
+.python/
+tools/
+output/
+
+# ========== IDE ==========
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ========== OS ==========
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ========== Logs ==========
+logs/
+*.log
+
+
+# ========== Docker ==========
+docker-compose.override.yml
+
+# ========== Environment Variables ==========
+.env
+.env.local
+.env.prod
+
+# ========== Temporary Files ==========
+*.tmp
+*.temp
+.cache
+
+# ========== Database ==========
+*.db
+*.sqlite
+*.sqlite3
+
+# ========== PyCharm ==========
+.idea/
+*.iws
+/out/
+
+# ========== VS Code ==========
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# ========== Jupyter ==========
+.ipynb_checkpoints
+
+# ========== Testing ==========
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+tests/
+test/*
+
+# ========== Package Management ==========
+.python-version
+Pipfile.lock
+poetry.lock
+
+# ========== Documentation ==========
+docs/_build/
+# Local _tkinter build SDK
+.sdk/
+logs/

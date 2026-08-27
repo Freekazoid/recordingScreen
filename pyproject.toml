@@ -1,0 +1,35 @@
+[project]
+name = "recordingScreen"
+version = "3.2.194"
+description = "Screen recorder with ASR and speaker diarization"
+requires-python = ">=3.10"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 140
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "S", "BLE"]
+ignore = ["E501", "S101", "S104", "S110", "S112", "S310", "S603", "S607", "BLE001"]
+
+[tool.ruff.lint.per-file-ignores]
+"test/*" = ["S101"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = false
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "audio_transcriber_service"
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"

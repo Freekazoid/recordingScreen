@@ -1,0 +1,66 @@
+# Screen Recorder - Python dependencies
+
+# Core ML/ASR
+# torch: для GPU ставить CUDA-сборку, например:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+torch>=2.0.0
+torchaudio>=2.0.0
+transformers>=4.30.0
+faster-whisper>=1.2.0
+ctranslate2>=4.6.0
+numpy>=1.24.0
+scipy>=1.10.0
+soundfile>=0.12.1
+vosk>=0.3.40
+
+# NVIDIA NeMo (диаризация Sortformer).
+# Экстра nemo_toolkit[asr] битая на PyPI (nv_one_logger-*-lightning не опубликован),
+# поэтому зависимости ставятся по отдельности.
+editdistance>=0.5.3; sys_platform != "win32"
+nemo_toolkit==2.7.3
+hydra-core<=1.3.2,>1.3
+omegaconf<=2.3
+lightning<=2.4.0,>2.2.1
+torchmetrics>=0.11.0
+fiddle
+cloudpickle
+nv-one-logger-core
+nv-one-logger-training-telemetry
+einops
+kaldialign
+lhotse>=1.33.0
+librosa>=0.10.1
+sacrebleu
+sentencepiece<1.0.0
+datasets>=3.2.0
+pandas
+jiwer
+braceexpand
+webdataset
+ipython
+matplotlib
+pyannote.core
+pyannote.metrics
+
+# Diarization / model downloads
+diarize>=0.0.1
+huggingface_hub>=0.24.0
+
+# Capture / UI / tray
+opencv-python>=4.8.0
+mss>=4.0.0
+Pillow>=10.0.0
+python-xlib>=0.33
+pyaudiowpatch>=0.2.12; sys_platform == "win32"  # WASAPI loopback на Windows
+pystray>=0.19.5
+dbus-next>=0.2.3,<0.3
+# Used by transformers/accelerate; must be bundled (system dist-packages breaks frozen AppImage)
+psutil>=5.9.0
+
+# Secure token storage (optional, falls back to file)
+keyring>=24.0.0
+
+# Build
+pyinstaller>=6.0.0
+
+# Note: ffmpeg and tkinter are system packages, not pip packages.

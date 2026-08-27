@@ -1,0 +1,210 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build_linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            python3-venv binutils \
+            libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1 \
+            python3-tk tk-dev
+      - name: Install Python deps
+        run: |
+          [ -f settings.json ] || echo '{"theme":"system"}' > settings.json
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -q --upgrade pip wheel
+          # CUDA torch: GPU-версия, чтобы в собранном AppImage работал
+          # переключатель устройств (Авто/GPU/CPU). CUDA-либы собирает
+          # build_AppImage.sh через --collect-all nvidia_*.
+          pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+          pip install -q -r requirements.txt
+          # Portal ScreenCast needs negotiate_unix_fd (dbus-next>=0.2.3)
+          pip install -q 'dbus-next>=0.2.3,<0.3'
+          python -c "import importlib.metadata,inspect; from dbus_next.aio.message_bus import MessageBus; v=importlib.metadata.version('dbus-next'); ok='negotiate_unix_fd' in inspect.signature(MessageBus.__init__).parameters; print(f'dbus-next={v} negotiate_unix_fd={ok}'); raise SystemExit(0 if ok else 'dbus-next without negotiate_unix_fd')"
+          pip cache purge
+      - name: Syntax check (Python >=3.11)
+        run: |
+          . .venv/bin/activate
+          python -m compileall -q src
+          echo "SYNTAX OK"
+      - name: Build
+        run: |
+          . .venv/bin/activate
+          APP_VERSION="${GITHUB_REF_NAME#v}"
+          [ "$APP_VERSION" = "main" ] && APP_VERSION="build-${GITHUB_RUN_NUMBER}"
+          export APP_VERSION
+          bash build_AppImage.sh
+          if [ $(stat -c%s "output/ScreenRecorder_v${APP_VERSION}.AppImage") -gt 2000000000 ]; then
+            split -b 1500M "output/ScreenRecorder_v${APP_VERSION}.AppImage" "output/ScreenRecorder_v${APP_VERSION}.AppImage.part-"
+            rm -f "output/ScreenRecorder_v${APP_VERSION}.AppImage"
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ScreenRecorder_linux
+          path: output/ScreenRecorder_v*
+
+  build_macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          [ -f settings.json ] || echo '{"theme":"system"}' > settings.json
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -q --upgrade pip wheel
+          pip install -q -r requirements.txt
+          pip cache purge
+      - name: Syntax check (Python >=3.11)
+        run: |
+          . .venv/bin/activate
+          python -m compileall -q src
+          echo "SYNTAX OK"
+      - name: Build
+        run: |
+          . .venv/bin/activate
+          APP_VERSION="${GITHUB_REF_NAME#v}"
+          [ "$APP_VERSION" = "main" ] && APP_VERSION="build-${GITHUB_RUN_NUMBER}"
+          export APP_VERSION CREATE_DMG=1
+          bash build_macOS.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ScreenRecorder_macos
+          path: |
+            output/*.zip
+            output/*.dmg
+
+  build_windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          if (-not (Test-Path settings.json)) { '{"theme":"system"}' | Out-File -Encoding utf8 settings.json }
+          python -m venv .venv
+          .venv\Scripts\python.exe -m pip install --upgrade pip wheel
+          .venv\Scripts\python.exe -m pip install -r requirements.txt
+          .venv\Scripts\python.exe -m pip cache purge
+      - name: Syntax check (Python >=3.11)
+        run: |
+          .venv\Scripts\python.exe -m compileall -q src
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "SYNTAX OK"
+      - name: Fetch ffmpeg (bundled)
+        shell: pwsh
+        run: |
+          $ffDir = "bin\windows"
+          if ((Test-Path "$ffDir\ffmpeg.exe") -and (Test-Path "$ffDir\ffprobe.exe")) {
+            Write-Host "ffmpeg already present"
+            exit 0
+          }
+          New-Item -ItemType Directory -Force -Path $ffDir | Out-Null
+          $url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          $zip = "$env:RUNNER_TEMP\ffmpeg.zip"
+          Write-Host "Downloading ffmpeg..."
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $extract = "$env:RUNNER_TEMP\ffmpeg_ext"
+          Expand-Archive -Path $zip -DestinationPath $extract -Force
+          $bin = Get-ChildItem -Path $extract -Recurse -Directory | Where-Object { $_.Name -eq "bin" } | Select-Object -First 1
+          Copy-Item (Join-Path $bin.FullName "ffmpeg.exe") "$ffDir\ffmpeg.exe" -Force
+          Copy-Item (Join-Path $bin.FullName "ffprobe.exe") "$ffDir\ffprobe.exe" -Force
+          Write-Host "ffmpeg fetched"
+      - name: Build
+        run: |
+          $py = ".venv\Scripts\python.exe"
+          $version = "$env:GITHUB_REF_NAME" -replace "^v", ""
+          if ($version -eq "main") { $version = "build-$env:GITHUB_RUN_NUMBER" }
+          $env:KMP_AFFINITY = "disabled"
+          $env:APP_VERSION = $version
+          # Stub for unpublished nv_one_logger integration (needed by NeMo
+          # analysis); see src/nemo_stubs/install_nemo_stub.py
+          & $py src\nemo_stubs\install_nemo_stub.py
+          # Keep Windows CI aligned with build_windows.sh PyInstaller flags
+          & $py -m PyInstaller --noconfirm --onefile --windowed --clean src/main.py `
+            --name "ScreenRecorder_v$version" `
+            --distpath output --workpath "$env:RUNNER_TEMP\build" `
+            --icon "assets\icon.ico" `
+            --add-data "assets;assets" `
+            --add-data "settings.json;." `
+            --add-data "src\default_settings.json;." `
+            --add-binary "bin\windows\ffmpeg.exe;bin" `
+            --add-binary "bin\windows\ffprobe.exe;bin" `
+            --collect-all "cuda" `
+            --collect-submodules "nemo" `
+            --collect-data "nemo_toolkit" `
+            --collect-data "lightning_fabric" `
+            --exclude-module "triton" `
+            --hidden-import "PIL._tkinter_finder" `
+            --hidden-import "dbus_next.aio" `
+            --hidden-import "dbus_next.aio.proxy_object" `
+            --collect-submodules "dbus_next" `
+            --collect-all "psutil" `
+            --hidden-import "psutil" `
+            --hidden-import "transformers.models.whisper" `
+            --hidden-import "transformers.models.whisper.modeling_whisper" `
+            --hidden-import "transformers.models.whisper.processing_whisper" `
+            --hidden-import "transformers.models.whisper.tokenization_whisper" `
+            --hidden-import "transformers.models.whisper.feature_extraction_whisper" `
+            --hidden-import "transformers.models.whisper.configuration_whisper" `
+            --collect-data "faster_whisper" `
+            --hidden-import "audio_transcriber_service" `
+            --hidden-import "background_tasks" `
+            --hidden-import "program_screen_wayland" `
+            --hidden-import "program_screen_win" `
+            --hidden-import "wasapi_loopback_record" `
+            --hidden-import "wayland_portal_async" `
+            --hidden-import "wayland_portal" `
+            --hidden-import "screencast_frame" `
+            --hidden-import "portal_identity" `
+            --hidden-import "settings_manager" `
+            --hidden-import "nemo_compat" `
+            --hidden-import "ffmpeg_pipewire" `
+            --hidden-import "merge_save"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ScreenRecorder_windows
+          path: output/*.exe
+
+  release:
+    needs: [build_linux, build_macos, build_windows]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name == 'main' && format('build-{0}', github.run_number) || github.ref_name }}
+          name: ${{ github.ref_name == 'main' && format('Build {0} ({1})', github.run_number, github.sha) || github.ref_name }}
+          body: "Commit: ${{ github.sha }}"
+          files: artifacts/*
+          fail_on_unmatched_files: false
+          generate_release_notes: ${{ startsWith(github.ref, 'refs/tags/') }}

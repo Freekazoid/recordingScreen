@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Вырезает трейлеры соавторства (Co-authored-by / Co-Authored-By) из
+# сообщения коммита. Агенты и боты не дописывают себя в авторы — см. AGENTS.md.
+f="$1"
+[ -f "$f" ] || exit 0
+
+sed -i '/^co-authored-by:/Id' "$f"
+
+# подрезать хвостовые пустые строки после удаления трейлеров
+tmp=$(mktemp)
+printf '%s\n' "$(cat "$f")" > "$tmp" && mv "$tmp" "$f"
+exit 0
