@@ -383,13 +383,22 @@ class AudioTranscriberService:
                 rows = raw[0] if isinstance(raw, (list, tuple)) and raw and isinstance(raw[0], (list, tuple)) else raw
                 segments = self._parse_sortformer_segments(rows)
             else:
+                # Оконная обработка длинных записей (NEMO_MAX_WINDOW_SEC).
+                # NeMo 2.7.3 принимает на вход str-путь или np.ndarray (с
+                # обязательным sample_rate), но НЕ dict-манифест — старый вариант
+                # audio=[{...}] падает ValueError. Режем waveform на окна и
+                # передаём numpy-срез с частотой дискретизации.
                 stride = NEMO_MAX_WINDOW_SEC - NEMO_WINDOW_OVERLAP_SEC
                 window_results = []
                 offset = 0.0
                 while offset < duration - 0.01:
                     win_dur = min(NEMO_MAX_WINDOW_SEC, duration - offset)
+                    start = int(round(offset * sr))
+                    end = int(min(round((offset + win_dur) * sr), waveform.shape[-1]))
+                    chunk = waveform[start:end]
                     raw = model.diarize(
-                        audio=[{"audio_filepath": input_file, "offset": offset, "duration": win_dur}],
+                        audio=chunk,
+                        sample_rate=sr,
                         batch_size=1,
                     )
                     rows = raw[0] if isinstance(raw, (list, tuple)) and raw and isinstance(raw[0], (list, tuple)) else raw
