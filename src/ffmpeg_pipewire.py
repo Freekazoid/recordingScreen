@@ -1,4 +1,4 @@
-"""Utilities for recording PipeWire streams via ffmpeg or GStreamer."""
+"""Утилиты для записи потоков PipeWire через ffmpeg или GStreamer."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from typing import Any
 
 @contextlib.contextmanager
 def _managed_dup_fd(fd: int):
+    """Дублирует fd и делает его наследуемым; закрывает дубликат при выходе."""
     dup_fd = os.dup(fd)
     try:
         os.set_inheritable(dup_fd, True)
@@ -28,24 +29,26 @@ def _managed_dup_fd(fd: int):
 
 
 class FFmpegNotFoundError(RuntimeError):
-    pass
+    """ffmpeg не найден среди встроенных/системных бинарников."""
 
 
 class FFmpegRecordingError(RuntimeError):
-    pass
+    """Ошибка записи потока PipeWire через ffmpeg."""
 
 
 class GstRecordingError(RuntimeError):
-    pass
+    """Ошибка записи потока PipeWire через GStreamer."""
 
 
 @dataclass
 class RecordingOptions:
+    """Параметры записи: файл выхода, fps, разрешение, кроп, кодек и качество."""
+
     output: str
     fps: int = 30
     width: int | None = None
     height: int | None = None
-    crop: str | None = None  # format: "w:h:x:y"
+    crop: str | None = None  # формат: "w:h:x:y"
     duration: int | None = None
     video_codec: str = "libx264"
     crf: int = 23
@@ -54,6 +57,7 @@ class RecordingOptions:
 
 
 def _resolve_ffmpeg_bin() -> str | None:
+    """Определяет путь к ffmpeg (встроенный или из системного PATH)."""
     try:
         from ffmpeg_locator import ffmpeg_command, has_ffmpeg
 
@@ -65,11 +69,12 @@ def _resolve_ffmpeg_bin() -> str | None:
 
 
 def ffmpeg_available() -> bool:
+    """True, если доступен ffmpeg."""
     return bool(_resolve_ffmpeg_bin())
 
 
 def pipewire_demuxer_available() -> bool:
-    """Check if ffmpeg has the pipewire demuxer."""
+    """Проверяет, поддерживает ли ffmpeg демодулятор pipewire."""
     ffmpeg_bin = _resolve_ffmpeg_bin()
     if not ffmpeg_bin:
         return False
@@ -84,7 +89,7 @@ def pipewire_demuxer_available() -> bool:
 
 
 def gst_pipewire_available() -> bool:
-    """Check if GStreamer pipewiresrc is available via Python bindings."""
+    """Проверяет, доступен ли pipewiresrc GStreamer через Python-привязки."""
     try:
         import gi
         gi.require_version("Gst", "1.0")
@@ -95,7 +100,7 @@ def gst_pipewire_available() -> bool:
 
 
 def gst_launch_pipewire_available() -> bool:
-    """System gst-launch-1.0 + pipewiresrc (works from frozen AppImage without PyGObject)."""
+    """Системный gst-launch-1.0 + pipewiresrc (работает из frozen AppImage без PyGObject)."""
     if not shutil.which("gst-launch-1.0"):
         return False
     try:
@@ -111,7 +116,7 @@ def gst_launch_pipewire_available() -> bool:
 
 
 def pipewire_recording_backend_available() -> bool:
-    """True when we can actually encode a PipeWire screen stream after portal."""
+    """True, когда поток экрана PipeWire можно фактически закодировать после портала."""
     return (
         pipewire_demuxer_available()
         or gst_pipewire_available()
@@ -120,6 +125,7 @@ def pipewire_recording_backend_available() -> bool:
 
 
 def _build_filter(options: RecordingOptions) -> str | None:
+    """Собирает цепочку фильтров из параметров (scale/crop/дополнительные)."""
     filters: list[str] = []
     if options.width and options.height:
         filters.append(f"scale={options.width}:{options.height}")
@@ -165,11 +171,13 @@ def _build_command(ffmpeg_bin: str, node_id: int, options: RecordingOptions) -> 
 
 
 class FFmpegPipewireProcess:
+    """Запись PipeWire-потока через ffmpeg (subprocess)."""
+
     def __init__(self, node_id: int, fd: int, options: RecordingOptions):
         ffmpeg_bin = _resolve_ffmpeg_bin()
         if not ffmpeg_bin:
             raise FFmpegNotFoundError(
-                "ffmpeg not found (bundled bin/ or system PATH)"
+                "ffmpeg не найден (встроенный bin/ или системный PATH)"
             )
 
         self._fd = -1
@@ -186,6 +194,7 @@ class FFmpegPipewireProcess:
         self._finished = threading.Event()
 
     def start(self):
+        """Запускает процесс ffmpeg и поток мониторинга его вывода."""
         if self._proc is not None:
             return
         self._proc = subprocess.Popen(
@@ -215,6 +224,7 @@ class FFmpegPipewireProcess:
         self._monitor_thread.start()
 
     def stop(self, timeout: float = 3.0):
+        """Корректно останавливает ffmpeg (SIGINT, затем terminate/kill)."""
         if self._proc is None or self._finished.is_set():
             return
 
@@ -255,13 +265,35 @@ class FFmpegPipewireProcess:
         return self._stdout
 
 
+    def wait(self, timeout: float | None = None) -> bool:
+        """Ждёт завершения процесса; возвращает True, если он завершился в срок."""
+        return self._finished.wait(timeout)
+
+    @property
+    def returncode(self) -> int | None:
+        """Код возврата процесса (None, пока он ещё не завершился)."""
+        if self._proc is None:
+            return None
+        return self._proc.returncode
+
+    @property
+    def stderr(self) -> str:
+        """Содержимое stderr процесса ffmpeg."""
+        return self._stderr
+
+    @property
+    def stdout(self) -> str:
+        """Содержимое stdout процесса ffmpeg."""
+        return self._stdout
+
+
 class GstPipewireProcess:
-    """GStreamer-based PipeWire recorder (fallback when ffmpeg lacks pipewire demuxer)."""
+    """Рекордер PipeWire на GStreamer (фолбэк, когда ffmpeg без демодулятора pipewire)."""
 
     def __init__(self, node_id: int, fd: int, options: RecordingOptions, log_callback=None):
         self._log_callback = log_callback or (lambda msg: None)
 
-        self._log("GstPipewireProcess: init start")
+        self._log("GstPipewireProcess: инициализация")
         try:
             import gi
             gi.require_version("Gst", "1.0")
@@ -270,7 +302,7 @@ class GstPipewireProcess:
             self._Gst = Gst
         except Exception as e:
             raise GstRecordingError(
-                f"GStreamer bindings not available: {e}"
+                f"Привязки GStreamer не доступны: {e}"
             )
 
         self._fd = -1
@@ -294,42 +326,44 @@ class GstPipewireProcess:
         self._log_callback(msg)
 
     def _set_prop(self, element, name: str, value) -> None:
+        """Безопасно устанавливает свойство GStreamer-элемента (ошибки игнорируются)."""
         try:
             element.set_property(name, value)
         except Exception as exc:
-            self._log(f"GstPipewireProcess: property {name}={value!r} skipped: {exc}")
+            self._log(f"GstPipewireProcess: свойство {name}={value!r} пропущено: {exc}")
 
     def _build_pipeline(self):
+        """Собирает и связывает конвейер GStreamer для записи."""
         gst = self._Gst
         pipeline = gst.Pipeline.new("pipewire-recorder")
-        self._log("GstPipewireProcess: building pipeline")
+        self._log("GstPipewireProcess: сборка конвейера")
 
         src = gst.ElementFactory.make("pipewiresrc", "source")
         if not src:
-            raise GstRecordingError("Failed to create pipewiresrc element")
+            raise GstRecordingError("Не удалось создать элемент pipewiresrc")
         self._set_prop(src, "fd", self._fd)
         self._set_prop(src, "path", str(self._node_id))
         self._set_prop(src, "always-copy", True)
         self._set_prop(src, "do-timestamp", True)
         self._src = src
-        self._log("GstPipewireProcess: pipewiresrc created")
+        self._log("GstPipewireProcess: pipewiresrc создан")
 
         queue = gst.ElementFactory.make("queue", "queue")
         if not queue:
-            raise GstRecordingError("Failed to create queue element")
+            raise GstRecordingError("Не удалось создать элемент queue")
         self._set_prop(queue, "max-size-buffers", 0)
         self._set_prop(queue, "max-size-bytes", 0)
         self._set_prop(queue, "max-size-time", 0)
 
         convert = gst.ElementFactory.make("videoconvert", "convert")
         if not convert:
-            raise GstRecordingError("Failed to create videoconvert element")
+            raise GstRecordingError("Не удалось создать элемент videoconvert")
         self._set_prop(convert, "n-threads", 0)
 
         capsfilter = gst.ElementFactory.make("capsfilter", "caps")
         if not capsfilter:
-            raise GstRecordingError("Failed to create capsfilter element")
-        # NV12 is friendlier for x264enc live encode than forcing I420 too early.
+            raise GstRecordingError("Не удалось создать элемент capsfilter")
+        # NV12 дружелюбнее для живого кодирования x264enc, чем преждевременный I420.
         caps = gst.Caps.from_string("video/x-raw,format=NV12")
         capsfilter.set_property("caps", caps)
         self._capsfilter = capsfilter
@@ -350,16 +384,16 @@ class GstPipewireProcess:
 
         scale = gst.ElementFactory.make("videoscale", "scale")
         if not scale:
-            raise GstRecordingError("Failed to create videoscale element")
+            raise GstRecordingError("Не удалось создать элемент videoscale")
         self._set_prop(scale, "method", 1)  # bilinear
 
         rate = gst.ElementFactory.make("videorate", "rate")
         if not rate:
-            raise GstRecordingError("Failed to create videorate element")
+            raise GstRecordingError("Не удалось создать элемент videorate")
         fps = max(1, int(self._options.fps or 30))
         rate_caps = gst.ElementFactory.make("capsfilter", "rate_caps")
         if not rate_caps:
-            raise GstRecordingError("Failed to create fps capsfilter")
+            raise GstRecordingError("Не удалось создать фильтр FPS")
         rate_caps.set_property(
             "caps",
             gst.Caps.from_string(f"video/x-raw,framerate={fps}/1"),
@@ -367,31 +401,31 @@ class GstPipewireProcess:
 
         enc = gst.ElementFactory.make("x264enc", "encoder")
         if not enc:
-            raise GstRecordingError("Failed to create x264enc element")
+            raise GstRecordingError("Не удалось создать элемент x264enc")
         self._set_prop(enc, "tune", 0x4)  # zerolatency
         self._set_prop(enc, "speed-preset", 3)  # veryfast
         self._set_prop(enc, "byte-stream", False)
         self._set_prop(enc, "key-int-max", fps * 2)
         self._set_prop(enc, "threads", 0)
-        # Constant quality (closer to ffmpeg CRF than CBR for live capture).
+        # Постоянное качество (ближе к ffmpeg CRF, чем CBR для живой записи).
         crf = max(1, min(50, self._options.crf or 23))
         self._set_prop(enc, "pass", 5)  # qual
         self._set_prop(enc, "quantizer", crf)
 
         parse = gst.ElementFactory.make("h264parse", "parse")
         if not parse:
-            raise GstRecordingError("Failed to create h264parse element")
+            raise GstRecordingError("Не удалось создать элемент h264parse")
 
-        # output.mkv must use matroska — qtmux produced a mislabeled/corrupt QT file.
+        # output.mkv обязан быть matroska — qtmux давал некорректный/битый QT-файл.
         muxer = gst.ElementFactory.make("matroskamux", "muxer")
         if not muxer:
-            raise GstRecordingError("Failed to create matroskamux element")
+            raise GstRecordingError("Не удалось создать элемент matroskamux")
         self._set_prop(muxer, "streamable", True)
         self._set_prop(muxer, "writing-app", "recordingscreen")
 
         sink = gst.ElementFactory.make("filesink", "sink")
         if not sink:
-            raise GstRecordingError("Failed to create filesink element")
+            raise GstRecordingError("Не удалось создать элемент filesink")
         self._set_prop(sink, "location", self._options.output)
         self._set_prop(sink, "sync", False)
         self._set_prop(sink, "async", False)
@@ -408,16 +442,17 @@ class GstPipewireProcess:
         for left, right in zip(elements, elements[1:]):
             if not left.link(right):
                 raise GstRecordingError(
-                    f"Failed to link pipeline elements: {left.get_name()} -> {right.get_name()}"
+                    f"Не удалось связать элементы конвейера: {left.get_name()} -> {right.get_name()}"
                 )
 
         self._pipeline = pipeline
         self._bus = pipeline.get_bus()
-        self._log("GstPipewireProcess: pipeline built and linked")
+        self._log("GstPipewireProcess: конвейер собран и связан")
 
     def start(self):
+        """Запускает конвейер GStreamer и фоновый поток наблюдения за шиной."""
         if self._pipeline is not None:
-            self._log("GstPipewireProcess: start called but already running")
+            self._log("GstPipewireProcess: start вызван, но уже запущен")
             return
         self._build_pipeline()
         self._add_timestamp_probe()
@@ -428,11 +463,11 @@ class GstPipewireProcess:
         ret_names = {0: "FAILURE", 1: "SUCCESS", 2: "ASYNC", 3: "NO_PREROLL"}
         self._log(f"GstPipewireProcess: set_state(PLAYING) -> {ret_names.get(ret, str(ret))}")
         if ret == self._Gst.StateChangeReturn.FAILURE:
-            raise GstRecordingError("GStreamer pipeline failed to enter PLAYING")
+            raise GstRecordingError("Конвейер GStreamer не вошёл в состояние PLAYING")
 
         import os
         file_exists = os.path.exists(self._options.output)
-        self._log(f"GstPipewireProcess: output file exists after start: {file_exists}")
+        self._log(f"GstPipewireProcess: файл выхода существует после старта: {file_exists}")
 
         def _bus_watch():
             bus = self._bus
@@ -454,7 +489,7 @@ class GstPipewireProcess:
                     t = msg.type
                     if t == self._Gst.MessageType.WARNING:
                         warning_count += 1
-                        # PipeWire/videoconvert can spam identical warnings; keep log readable.
+                        # PipeWire/videoconvert может спамить одинаковые предупреждения.
                         if warning_count <= 5 or warning_count % 50 == 0:
                             dbg = msg.parse_warning()
                             self._log(
@@ -483,18 +518,20 @@ class GstPipewireProcess:
         self._monitor_thread.start()
 
     def _shutdown(self):
+        """Переводит конвейер в NULL и освобождает ссылки на элементы."""
         with self._lock:
             if self._pipeline is not None:
-                self._log("GstPipewireProcess: setting pipeline to NULL")
+                self._log("GstPipewireProcess: перевод конвейера в NULL")
                 self._pipeline.set_state(self._Gst.State.NULL)
                 self._pipeline = None
                 self._bus = None
                 self._src = None
                 self._crop_element = None
                 self._capsfilter = None
-                self._log("GstPipewireProcess: pipeline stopped")
+                self._log("GstPipewireProcess: конвейер остановлен")
 
     def _cleanup(self):
+        """Закрывает продублированный файловый дескриптор, если он ещё открыт."""
         if self._fd >= 0:
             with self._lock:
                 if self._fd >= 0:
@@ -505,6 +542,7 @@ class GstPipewireProcess:
                     self._fd = -1
 
     def _add_timestamp_probe(self):
+        """Добавляет пробы для корректной выдачи временных меток кадров."""
         src_pad = self._src.get_static_pad("src")
         fps = self._options.fps or 30
         start_time = [None]
@@ -523,6 +561,7 @@ class GstPipewireProcess:
         src_pad.add_probe(self._Gst.PadProbeType.BUFFER, _probe)
 
     def _add_crop_probe(self):
+        """Добавляет пробу, вычисляющую кроп по фактическому разрешению кадра."""
         if not self._crop_info or not self._crop_element or not self._capsfilter:
             return
         cx, cy, cw, ch = self._crop_info
@@ -556,8 +595,9 @@ class GstPipewireProcess:
         src_pad.add_probe(gst.PadProbeType.EVENT_DOWNSTREAM, _crop_probe)
 
     def stop(self, timeout: float = 8.0):
+        """Останавливает запись: шлёт EOS и ждёт завершения, при таймауте — принудительно."""
         if self._finished.is_set():
-            self._log("GstPipewireProcess: stop called but already finished")
+            self._log("GstPipewireProcess: stop вызван, но уже завершено")
             return
         self._log(f"GstPipewireProcess: stopping (timeout={timeout}s)")
         import os
@@ -583,34 +623,39 @@ class GstPipewireProcess:
         self._log(f"GstPipewireProcess: output file exists after stop: {after_exists}, size={after_size}")
 
     def close(self):
+        """Полностью завершает работу: останавливает конвейер и закрывает fd."""
         self._shutdown()
         self._finished.set()
         self._cleanup()
 
     def wait(self, timeout: float | None = None) -> bool:
+        """Ждёт завершения записи; возвращает True, если она завершилась в срок."""
         return self._finished.wait(timeout)
 
     @property
     def returncode(self) -> int | None:
+        """Код завершения записи (0 — успех, 1 — ошибка, None — ещё идёт)."""
         return self._returncode
 
     @property
     def stderr(self) -> str:
+        """Текст последней ошибки записи."""
         return self._error_message
 
     @property
     def stdout(self) -> str:
+        """Стандартный вывод (пусто — GStreamer пишет только предупреждения/ошибки)."""
         return ""
 
 
 class GstLaunchPipewireProcess:
-    """Record PipeWire via system gst-launch-1.0 (no Python GStreamer bindings)."""
+    """Запись PipeWire через системный gst-launch-1.0 (без Python-привязок GStreamer)."""
 
     def __init__(self, node_id: int, fd: int, options: RecordingOptions, log_callback=None):
         self._log = log_callback or (lambda _msg: None)
         launch = shutil.which("gst-launch-1.0")
         if not launch:
-            raise GstRecordingError("gst-launch-1.0 not found")
+            raise GstRecordingError("gst-launch-1.0 не найден")
 
         self._fd = -1
         with _managed_dup_fd(fd) as dup_fd:
@@ -618,7 +663,7 @@ class GstLaunchPipewireProcess:
 
         fps = max(1, int(options.fps or 30))
         crf = max(1, min(50, int(options.crf or 23)))
-        # Keep pipeline close to GstPipewireProcess; window streams are usually pre-cropped.
+        # Конвейер максимально близок к GstPipewireProcess; окна обычно предварительно обрезаны.
         pipeline = (
             f"pipewiresrc fd={self._fd} path={int(node_id)} always-copy=true do-timestamp=true ! "
             f"queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! "
@@ -639,6 +684,7 @@ class GstLaunchPipewireProcess:
         self._finished = threading.Event()
 
     def start(self):
+        """Запускает gst-launch-1.0 и поток мониторинга его вывода."""
         if self._proc is not None:
             return
         self._proc = subprocess.Popen(
@@ -667,6 +713,7 @@ class GstLaunchPipewireProcess:
         self._monitor_thread.start()
 
     def stop(self, timeout: float = 5.0):
+        """Корректно останавливает gst-launch-1.0 (SIGINT, затем terminate/kill)."""
         if self._proc is None or self._finished.is_set():
             return
         try:
@@ -686,31 +733,36 @@ class GstLaunchPipewireProcess:
         self._finished.wait(timeout)
 
     def wait(self, timeout: float | None = None) -> bool:
+        """Ждёт завершения процесса; возвращает True, если он завершился в срок."""
         return self._finished.wait(timeout)
 
     @property
     def returncode(self) -> int | None:
+        """Код возврата процесса (None, пока он ещё не завершился)."""
         if self._proc is None:
             return None
         return self._proc.returncode
 
     @property
     def stderr(self) -> str:
+        """Содержимое stderr процесса gst-launch."""
         return self._stderr
 
     @property
     def stdout(self) -> str:
+        """Содержимое stdout процесса gst-launch."""
         return self._stdout
 
 
 def record_pipewire_stream(node_id: int, fd: int, options: RecordingOptions) -> None:
+    """Записывает поток PipeWire первым доступным бэкендом (ffmpeg -> GStreamer)."""
     if pipewire_demuxer_available():
         proc = FFmpegPipewireProcess(node_id=node_id, fd=fd, options=options)
         proc.start()
         proc.wait()
         if proc.returncode != 0:
             raise FFmpegRecordingError(
-                f"ffmpeg exited with code {proc.returncode}.\n"
+                f"ffmpeg завершился с кодом {proc.returncode}.\n"
                 f"Stderr: {proc.stderr}"
             )
         return
@@ -721,7 +773,7 @@ def record_pipewire_stream(node_id: int, fd: int, options: RecordingOptions) -> 
         proc.wait()
         if proc.returncode != 0:
             raise GstRecordingError(
-                f"GStreamer recording failed:\n{proc.stderr}"
+                f"Ошибка записи через GStreamer:\n{proc.stderr}"
             )
         return
 
@@ -731,13 +783,13 @@ def record_pipewire_stream(node_id: int, fd: int, options: RecordingOptions) -> 
         proc.wait()
         if proc.returncode != 0:
             raise GstRecordingError(
-                f"gst-launch recording failed:\n{proc.stderr}"
+                f"Ошибка записи через gst-launch:\n{proc.stderr}"
             )
         return
 
     raise FFmpegNotFoundError(
-        "No available PipeWire recording backend. "
-        "Install gstreamer1.0-pipewire (gst-launch-1.0) or ffmpeg with pipewire demuxer."
+        "Нет доступного бэкенда записи PipeWire. "
+        "Установите gstreamer1.0-pipewire (gst-launch-1.0) или ffmpeg с демодулятором pipewire."
     )
 
 

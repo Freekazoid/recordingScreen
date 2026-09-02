@@ -1,4 +1,4 @@
-"""Asynchronous helpers for xdg-desktop-portal ScreenCast via dbus-next."""
+"""Асинхронные помощники для xdg-desktop-portal ScreenCast через dbus-next."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ try:
         _DBUS_SUPPORTS_UNIX_FD = "negotiate_unix_fd" in inspect.signature(MessageBus.__init__).parameters
     except (TypeError, ValueError):
         _DBUS_SUPPORTS_UNIX_FD = False
-except Exception as exc:  # pragma: no cover - depends on system/venv packages
+except Exception as exc:  # pragma: no cover - зависит от системных/venv пакетов
     Message = MessageType = Variant = MessageBus = ProxyInterface = None
     _DBUS_IMPORT_ERROR = str(exc)
     _DBUS_SUPPORTS_UNIX_FD = False
@@ -52,24 +52,26 @@ SCREENCAST_INTERFACE = "org.freedesktop.portal.ScreenCast"
 REQUEST_INTERFACE = "org.freedesktop.portal.Request"
 SESSION_INTERFACE = "org.freedesktop.portal.Session"
 
-# SelectSources shows the compositor picker; allow enough time for the user.
+# SelectSources показывает выбор композитора; даём пользователю достаточно времени.
 _PORTAL_RESPONSE_TIMEOUT_S = 300.0
 
 
 class PortalError(RuntimeError):
-    pass
+    """Ошибка взаимодействия с порталом ScreenCast."""
 
 
 def dbus_available() -> bool:
+    """True, если доступен модуль dbus-next."""
     return _DBUS_AVAILABLE
 
 
 def dbus_supports_unix_fd() -> bool:
-    """True when MessageBus can negotiate Unix FDs (needed for PipeWire portal FD)."""
+    """True, когда MessageBus может передавать Unix-FD (нужно для FD портала PipeWire)."""
     return _DBUS_AVAILABLE and _DBUS_SUPPORTS_UNIX_FD
 
 
 def dbus_dependency_error() -> str:
+    """Текст ошибки, если зависимость (dbus-next) недоступна или неполна."""
     if _DBUS_IMPORT_ERROR:
         return _DBUS_IMPORT_ERROR
     if _DBUS_AVAILABLE and not _DBUS_SUPPORTS_UNIX_FD:
@@ -77,10 +79,11 @@ def dbus_dependency_error() -> str:
             "dbus-next без negotiate_unix_fd "
             "(нужен dbus-next>=0.2.3 или backend PyGObject)"
         )
-    return "dbus-next module not available"
+    return "модуль dbus-next не доступен"
 
 
 def _unwrap(value: Any) -> Any:
+    """Рекурсивно разворачивает варианты dbus-next в обычные значения."""
     if isinstance(value, Variant):
         return _unwrap(value.value)
     if isinstance(value, dict):
@@ -91,16 +94,17 @@ def _unwrap(value: Any) -> Any:
 
 
 def _token(prefix: str) -> str:
+    """Создаёт случайный токен с безопасным префиксом для запросов портала."""
     safe_prefix = "".join(ch if ch.isalnum() else "_" for ch in prefix)
     return f"{safe_prefix}_{secrets.token_hex(6)}"
 
 
 def _predict_request_path(unique_name: str, handle_token: str) -> str:
-    """Build the Request object path before the portal method returns.
+    """Строит путь объекта Request до того, как метод портала вернёт ответ.
 
-    xdg-desktop-portal documents:
+    xdg-desktop-portal документирует:
     /org/freedesktop/portal/desktop/request/SENDER/TOKEN
-    where SENDER is the unique name without leading ':' and with '.' -> '_'.
+    где SENDER — уникальное имя без ведущего ':' и с заменой '.' -> '_'.
     """
     sender = unique_name[1:] if unique_name.startswith(":") else unique_name
     sender = sender.replace(".", "_")
@@ -109,17 +113,22 @@ def _predict_request_path(unique_name: str, handle_token: str) -> str:
 
 @dataclass
 class StreamInfo:
+    """Информация о потоке PipeWire: идентификатор узла и его свойства."""
+
     node_id: int
     properties: dict[str, Any]
 
 
 class ScreenCastSession:
+    """Представляет созданную сессию ScreenCast (дескриптор и интерфейс DBus)."""
+
     def __init__(self, bus: MessageBus, interface: ProxyInterface, session_handle: str):
         self._bus = bus
         self._interface = interface
         self.session_handle = session_handle
 
     async def close(self) -> None:
+        """Закрывает сессию через портал."""
         await self._interface.bus.call(Message(
             destination=PORTAL_BUS_NAME,
             path=self.session_handle,
@@ -129,11 +138,14 @@ class ScreenCastSession:
 
 
 class ScreenCastPortal:
+    """Клиент портала ScreenCast поверх dbus-next (асинхронный)."""
+
     def __init__(self):
         self._bus: MessageBus | None = None
         self._interface: ProxyInterface | None = None
 
     async def connect(self) -> None:
+        """Подключается к порталу и получает интерфейс ScreenCast."""
         if not dbus_available():
             raise PortalError(f"dbus-next недоступен: {dbus_dependency_error()}")
         if not dbus_supports_unix_fd():
@@ -147,8 +159,9 @@ class ScreenCastPortal:
         self._interface = proxy.get_interface(SCREENCAST_INTERFACE)
 
     async def create_session(self, persist: bool = False) -> ScreenCastSession:
+        """Создаёт новую сессию ScreenCast и возвращает её объект."""
         if not self._interface or not self._bus:
-            raise PortalError("Portal not connected")
+            raise PortalError("Портал не подключён")
 
         session_token = _token("session")
         handle_token = _token("handle")
@@ -169,7 +182,7 @@ class ScreenCastPortal:
         payload = _unwrap(response[1])
         session_handle = payload.get("session_handle")
         if not session_handle:
-            raise PortalError("Portal did not return session handle")
+            raise PortalError("Портал не вернул дескриптор сессии")
         return ScreenCastSession(self._bus, self._interface, session_handle)
 
     async def select_sources(
@@ -179,8 +192,9 @@ class ScreenCastPortal:
         multiple: bool = False,
         cursor_mode: int = 2,
     ) -> None:
+        """Открывает диалог выбора источника (окна/монитора) через портал."""
         if not self._interface:
-            raise PortalError("Portal not connected")
+            raise PortalError("Портал не подключён")
         resolved_cursor_mode = await self._resolve_cursor_mode(cursor_mode)
         handle_token = _token("handle")
         response = await self._call_with_response(
@@ -200,8 +214,9 @@ class ScreenCastPortal:
             raise PortalError(_response_error("SelectSources", code))
 
     async def start(self, session: ScreenCastSession, parent_window: str = "") -> list[StreamInfo]:
+        """Запускает захват и возвращает список потоков PipeWire."""
         if not self._interface:
-            raise PortalError("Portal not connected")
+            raise PortalError("Портал не подключён")
         handle_token = _token("handle")
         response = await self._call_with_response(
             handle_token,
@@ -224,8 +239,9 @@ class ScreenCastPortal:
         return streams
 
     async def open_pipewire_remote(self, session: ScreenCastSession) -> int:
+        """Возвращает продублированный файловый дескриптор подключения к PipeWire."""
         if not self._interface:
-            raise PortalError("Portal not connected")
+            raise PortalError("Портал не подключён")
         reply = await self._interface.call_open_pipe_wire_remote(
             session.session_handle,
             {},
@@ -260,13 +276,14 @@ class ScreenCastPortal:
         *,
         timeout: float = _PORTAL_RESPONSE_TIMEOUT_S,
     ) -> tuple[int, dict[str, Any]]:
-        """Invoke a portal method after subscribing to Request.Response.
+        """Вызывает метод портала после подписки на Request.Response.
 
-        Registering the handler only after the method returns races the portal:
-        Response can arrive before we listen, so SelectSources never shows UI.
+        Регистрировать обработчик только после возврата метода — гонка с порталом:
+        Response может прийти раньше, чем мы начнём слушать, и SelectSources
+        никогда не покажет интерфейс.
         """
         if not self._bus or not self._bus.unique_name:
-            raise PortalError("Portal not connected")
+            raise PortalError("Портал не подключён")
 
         request_path = _predict_request_path(self._bus.unique_name, handle_token)
         loop = asyncio.get_running_loop()
@@ -296,6 +313,7 @@ class ScreenCastPortal:
             self._bus.remove_message_handler(handler)
 
     async def _resolve_cursor_mode(self, requested: int) -> int:
+        """Согласует желаемый режим курсора с возможностями портала."""
         if not self._bus:
             return requested
         try:
@@ -336,14 +354,15 @@ __all__ = [
 
 
 def _coerce_unix_fd(reply: Any) -> int:
-    """Normalize OpenPipeWireRemote reply to a raw FD int.
+    """Нормализует ответ OpenPipeWireRemote до целочисленного Unix-FD.
 
-    dbus-next high-level API returns a single DBus 'h' as a plain int, not [fd].
+    Верхнеуровневый API dbus-next возвращает один DBus-тип 'h' как обычное
+    int, а не [fd].
     """
     if reply is None:
-        raise PortalError("Portal did not return PipeWire fd")
+        raise PortalError("Портал не вернул PipeWire fd")
     if isinstance(reply, bool):
-        raise PortalError(f"Portal returned unexpected FD value: {reply!r}")
+        raise PortalError(f"Портал вернул неожиданное значение FD: {reply!r}")
     if isinstance(reply, int):
         return reply
     if hasattr(reply, "take"):
@@ -353,10 +372,11 @@ def _coerce_unix_fd(reply: Any) -> int:
     try:
         return int(reply)
     except Exception as exc:
-        raise PortalError(f"Portal returned unexpected FD value: {reply!r}") from exc
+        raise PortalError(f"Портал вернул неожиданное значение FD: {reply!r}") from exc
 
 
 def _response_error(method: str, code: int) -> str:
+    """Текстовое описание кода ответа портала для сообщения об ошибке."""
     if code == 1:
         return f"{method}: действие отменено пользователем"
     if code == 2:

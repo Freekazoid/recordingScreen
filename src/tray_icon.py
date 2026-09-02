@@ -7,6 +7,7 @@ from pystray import MenuItem as Item
 
 
 def create_tray_icon(root, appwin):
+    """Создаёт и запускает иконку системного трея с меню управления записью."""
     os.environ["PYGOBJECT_FORCE_GTK3"] = "0"
 
     menu = pystray.Menu(
@@ -40,11 +41,13 @@ _tray_app = None
 
 
 def _on_show(icon, item):
+    """Обработчик меню «Показать окно»: разворачивает и показывает главное окно."""
     if _tray_root and _tray_root.winfo_exists():
         _tray_root.after(0, _show_win)
 
 
 def _show_win():
+    """Показывает и поднимает главное окно из трея."""
     if _tray_root and _tray_root.winfo_exists():
         _tray_root.state("normal")
         _tray_root.deiconify()
@@ -52,31 +55,37 @@ def _show_win():
 
 
 def _on_hide(icon, item):
+    """Обработчик меню «Скрыть окно»: сворачивает главное окно в трей."""
     if _tray_root and _tray_root.winfo_exists():
         _tray_root.withdraw()
 
 
 def _on_fullscreen(icon, item):
+    """Обработчик меню «Запись всего экрана»."""
     if _tray_root:
         _tray_root.after(0, _tray_app.on_full_screen)
 
 
 def _on_area(icon, item):
+    """Обработчик меню «Запись области»."""
     if _tray_root:
         _tray_root.after(0, _tray_app.on_area_screen)
 
 
 def _on_program(icon, item):
+    """Обработчик меню «Запись программы»."""
     if _tray_root:
         _tray_root.after(0, _tray_app.on_program_screen)
 
 
 def _on_stop(icon, item):
+    """Обработчик меню «Стоп»: останавливает текущую запись."""
     if _tray_root:
         _tray_root.after(0, _tray_app.stop_current)
 
 
 def _on_quit(icon, item):
+    """Обработчик меню «Выход»: останавливает запись, закрывает окно и завершает иконку трея."""
     if _tray_app:
         _tray_app.stop_current()
     if _tray_root:
@@ -85,6 +94,7 @@ def _on_quit(icon, item):
 
 
 def setup(root_ref, appwin_ref):
+    """Запускает иконку трея в отдельном фоновом потоке, сохраняя ссылки на окно и приложение."""
     global _tray_root, _tray_app
     _tray_root = root_ref
     _tray_app = appwin_ref
@@ -94,4 +104,5 @@ def setup(root_ref, appwin_ref):
 
 
 def stop_tray_icon():
+    """Пустая заглушка для остановки трея: поток живёт до завершения процесса."""
     pass

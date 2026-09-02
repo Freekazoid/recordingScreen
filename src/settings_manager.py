@@ -80,6 +80,7 @@ _BOOL_FALSE = {"", "0", "false", "no", "off", "нет", "ложь", "выкл"}
 
 
 def _coerce_bool(value) -> bool:
+    """Приводит значение к bool, распознавая строковые представления истины/лжи по фиксированным наборам слов."""
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -92,6 +93,7 @@ def _coerce_bool(value) -> bool:
 
 
 def config_file() -> str:
+    """Возвращает путь к пользовательскому файлу настроек в каталоге данных."""
     return os.path.join(get_writable_base_dir(), "settings.json")
 
 

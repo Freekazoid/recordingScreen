@@ -23,16 +23,19 @@ _platform_dir = (
 
 
 def _binary_name(tool: str) -> str:
+    """Возвращает имя исполняемого файла с суффиксом .exe на Windows."""
     return f"{tool}.exe" if sys.platform == "win32" else tool
 
 
 def _project_root() -> str:
+    """Возвращает корень проекта: рядом с исполняемым файлом (frozen) или каталог выше."""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _candidate_dirs() -> list[str]:
+    """Возвращает уникальные каталоги-кандидаты для поиска ffmpeg/ffprobe."""
     dirs: list[str] = []
     root = _project_root()
     dirs.append(root)
@@ -60,6 +63,7 @@ def _candidate_dirs() -> list[str]:
 
 
 def resolve_tool(tool: str) -> str:
+    """Ищет инструмент в каталогах-кандидатах, затем в PATH; иначе возвращает его имя."""
     binary = _binary_name(tool)
 
     for d in _candidate_dirs():
@@ -75,6 +79,7 @@ def resolve_tool(tool: str) -> str:
 
 
 def has_tool(tool: str) -> bool:
+    """Проверяет наличие инструмента в файловой системе или PATH."""
     resolved = resolve_tool(tool)
     if os.path.isabs(resolved):
         return os.path.isfile(resolved)
@@ -82,14 +87,17 @@ def has_tool(tool: str) -> bool:
 
 
 def ffmpeg_command() -> str:
+    """Возвращает путь к ffmpeg или его имя."""
     return resolve_tool("ffmpeg")
 
 
 def ffprobe_command() -> str:
+    """Возвращает путь к ffprobe или его имя."""
     return resolve_tool("ffprobe")
 
 
 def has_ffmpeg() -> bool:
+    """Проверяет доступность ffmpeg."""
     return has_tool("ffmpeg")
 
 
@@ -118,7 +126,9 @@ def writable_bin_dir() -> str:
 
 
 def _download(url: str, progress: Callable[[int, int], None] | None = None) -> bytes:
+    """Скачивает содержимое URL и возвращает его как байты."""
     def _hook(blocks, block_size, total) -> None:
+        """Callback для отслеживания прогресса загрузки."""
         if progress and total:
             progress(blocks * block_size, total)
     with urllib.request.urlopen(url, timeout=60) as resp:
@@ -153,6 +163,7 @@ def _extract_ffmpeg_family(archive_path: str, dest_dir: str) -> None:
 
 
 def _default_ffmpeg_url() -> str:
+    """Возвращает URL статической сборки ffmpeg для текущей платформы."""
     return {
         "windows": _WINDOWS_ZIP,
         "linux": _LINUX_TAR,
@@ -203,6 +214,7 @@ def ensure_ffmpeg(progress: Callable[[int, int], None] | None = None) -> bool:
 
 
 def _cleanup(path: str) -> None:
+    """Пытается удалить файл, игнорируя ошибки."""
     try:
         if os.path.exists(path):
             os.unlink(path)

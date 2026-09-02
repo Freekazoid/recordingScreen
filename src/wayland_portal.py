@@ -1,4 +1,4 @@
-"""Helpers for interacting with xdg-desktop-portal ScreenCast on Wayland."""
+"""Вспомогательные функции для работы с xdg-desktop-portal ScreenCast на Wayland."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ try:
     from gi.repository import Gio, GLib
 
     _GI_AVAILABLE = True
-except Exception as exc:  # pragma: no cover - availability depends on system packages
+except Exception as exc:  # pragma: no cover - доступность зависит от системных пакетов
     Gio = GLib = None
     _GI_ERROR_MESSAGE = str(exc)
 
@@ -34,26 +34,31 @@ WINDOW_SOURCE_TYPE = 2
 
 
 class WaylandPortalError(RuntimeError):
-    """Raised when ScreenCast portal interaction fails."""
+    """Вызывается, когда не удаётся взаимодействовать с порталом ScreenCast."""
 
 
 def is_wayland_session() -> bool:
+    """True, если текущая сессия запущена под Wayland."""
     return os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
 
 
 def portal_dependencies_available() -> bool:
+    """True, если доступны привязки PyGObject (Gio/GLib) для портала."""
     return _GI_AVAILABLE
 
 
 def portal_dependency_error() -> str:
-    return _GI_ERROR_MESSAGE or "gi (PyGObject) module not available"
+    """Текст ошибки, если зависимости портала недоступны."""
+    return _GI_ERROR_MESSAGE or "модуль gi (PyGObject) не доступен"
 
 
 def _variant_dict(items: dict[str, GLib.Variant]) -> dict[str, GLib.Variant]:
+    """Возвращает словарь вариантов без изменений (совместимость с DBus)."""
     return items
 
 
 def _deep_unpack(value: Any) -> Any:
+    """Рекурсивно разворачивает вложенные варианты GLib в обычные значения."""
     if hasattr(value, "unpack"):
         try:
             value = value.unpack()
@@ -67,6 +72,7 @@ def _deep_unpack(value: Any) -> Any:
 
 
 def _token(prefix: str) -> str:
+    """Генерирует случайный токен с безопасным префиксом для запросов портала."""
     safe_prefix = "".join(ch if ch.isalnum() else "_" for ch in prefix)
     return f"{safe_prefix}_{uuid.uuid4().hex}"
 
@@ -110,7 +116,7 @@ def _decide_cursor_mode(
 
 
 class WaylandPortalSession:
-    """High-level helper around org.freedesktop.portal.ScreenCast."""
+    """Высокоуровневый помощник вокруг org.freedesktop.portal.ScreenCast."""
 
     def __init__(
         self,
@@ -144,12 +150,12 @@ class WaylandPortalSession:
         self._session_proxy: Gio.DBusProxy | None = None
 
     # ------------------------------------------------------------------
-    # Public API
+    # Публичный API
     # ------------------------------------------------------------------
     def open_stream(
         self, parent_window: str = ""
     ) -> dict[str, Any] | None:
-        """Request a PipeWire stream via portal dialogs."""
+        """Запросить поток PipeWire через диалоги портала."""
 
         self._create_session()
         try:
@@ -175,6 +181,7 @@ class WaylandPortalSession:
         }
 
     def close(self):
+        """Закрывает сессию ScreenCast на стороне портала (если она была создана)."""
         if not portal_dependencies_available():
             return
         if self._session_proxy is None:
@@ -194,9 +201,10 @@ class WaylandPortalSession:
             self._session_handle = None
 
     # ------------------------------------------------------------------
-    # Internals
+    # Внутренняя реализация
     # ------------------------------------------------------------------
     def _log(self, message: str):
+        """Пишет сообщение в журнал wayland.log и передаёт его в логгер интерфейса."""
         import datetime
         import os
         timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -218,6 +226,7 @@ class WaylandPortalSession:
                 pass
 
     def _ensure_source_type_available(self) -> bool:
+        """Проверяет, поддерживает ли портал запрошенный тип источника (окно/монитор)."""
         try:
             variant = self._portal.get_cached_property("AvailableSourceTypes")
         except Exception:
@@ -234,6 +243,7 @@ class WaylandPortalSession:
         return bool(available_mask & self.source_types)
 
     def _create_session(self):
+        """Создаёт сессию ScreenCast и сохраняет её дескриптор и DBus-прокси."""
         handle_token = _token("screenrec")
         session_token = _token("session")
         options = _variant_dict(
@@ -280,6 +290,7 @@ class WaylandPortalSession:
             pass
 
     def _select_sources(self):
+        """Открывает диалог выбора источника (окна/монитора) через портал."""
         if not self._session_handle:
             raise WaylandPortalError("Сессия не создана")
 
@@ -309,6 +320,7 @@ class WaylandPortalSession:
             raise WaylandPortalError("Запрос источника отклонён пользователем")
 
     def _resolve_cursor_mode(self) -> int | None:
+        """Согласует желаемый режим курсора с возможностями портала."""
         requested = int(self.cursor_mode)
         portal_version = self._get_portal_property("version")
         available_mask = self._get_portal_property("AvailableCursorModes")
@@ -321,6 +333,7 @@ class WaylandPortalSession:
         )
 
     def _start_session(self, parent_window: str) -> dict[str, Any] | None:
+        """Запускает сессию захвата и возвращает потоки; None при отмене пользователем."""
         if not self._session_handle:
             raise WaylandPortalError("Сессия не создана")
 
@@ -342,7 +355,7 @@ class WaylandPortalSession:
         request_path = self._extract_path_result(result)
         response_code, response = self._wait_request(request_path)
         if response_code != 0:
-            # 1 = cancelled, 2 = denied
+            # 1 = отменено, 2 = отклонено
             return None
 
         parsed: dict[str, Any] = {}
@@ -354,6 +367,7 @@ class WaylandPortalSession:
         return parsed
 
     def _open_pipewire_remote(self) -> int:
+        """Возвращает дублированный файловый дескриптор для подключения к PipeWire."""
         if not self._session_handle:
             raise WaylandPortalError("Сессия не создана")
 
@@ -382,6 +396,7 @@ class WaylandPortalSession:
 
     @staticmethod
     def _extract_path_result(result_variant) -> str:
+        """Извлекает путь объектного запроса из ответа портала."""
         unpacked = result_variant.unpack()
         if isinstance(unpacked, (tuple, list)):
             return str(unpacked[0])
@@ -394,6 +409,7 @@ class WaylandPortalSession:
         raise WaylandPortalError(f"Неожиданный формат ответа портала: {unpacked!r}")
 
     def _get_portal_property(self, property_name: str) -> int | None:
+        """Читает целочисленное свойство интерфейса ScreenCast (версию/маски режимов)."""
         try:
             props_proxy = Gio.DBusProxy.new_sync(
                 self._bus,
@@ -420,6 +436,7 @@ class WaylandPortalSession:
 
     @staticmethod
     def _extract_fd_index_result(result_variant) -> int:
+        """Извлекает индекс файлового дескриптора из ответа портала."""
         unpacked = result_variant.unpack()
         if isinstance(unpacked, (tuple, list)):
             return int(unpacked[0])
@@ -432,6 +449,7 @@ class WaylandPortalSession:
         return int(unpacked)
 
     def _wait_request(self, request_path: str, timeout: int = 60) -> tuple[int, dict[str, GLib.Variant]]:
+        """Ожидает ответ Request от портала; возвращает (код ответа, данные)."""
         proxy = Gio.DBusProxy.new_sync(
             self._bus,
             Gio.DBusProxyFlags.NONE,
@@ -478,6 +496,7 @@ class WaylandPortalSession:
 
     @staticmethod
     def _parse_streams(variant) -> list[dict[str, Any]]:
+        """Разбирает список потоков из ответа портала в удобный вид."""
         streams: list[dict[str, Any]] = []
         try:
             unpacked = variant.unpack() if hasattr(variant, "unpack") else variant
@@ -500,6 +519,7 @@ class WaylandPortalSession:
         return streams
 
     def _on_session_signal(self, _proxy, _sender, signal_name, _params):
+        """Обрабатывает сигналы сессии (например закрытие порталом)."""
         if signal_name == "Closed":
             self._log("Портал завершил сессию ScreenCast")
 

@@ -6,17 +6,15 @@ from datetime import datetime
 
 
 def _log_dir() -> str:
-    """Prefer a writable logs/ inside app data; else cwd/logs."""
+    """Выбирает записываемый каталог logs/ рядом с программой; иначе cwd/logs."""
     candidates: list[str] = []
-    if getattr(sys, "frozen", False):
-        try:
-            from app_paths import get_writable_base_dir
+    try:
+        from app_paths import get_writable_base_dir
 
-            candidates.append(
-                os.path.join(get_writable_base_dir(), "logs")
-            )
-        except Exception:
-            pass
+        candidates.append(os.path.join(get_writable_base_dir(), "logs"))
+    except Exception:
+        pass
+    if getattr(sys, "frozen", False):
         base = os.path.dirname(os.path.abspath(sys.executable))
         candidates.append(os.path.join(base, "logs"))
     candidates.append("logs")
@@ -34,6 +32,7 @@ def _log_dir() -> str:
 
 
 def write_error_report(category: str, message: str, *, extra: str | None = None) -> str:
+    """Дописывает сообщение об ошибке в файл <category>.log и возвращает его путь."""
     log_dir = _log_dir()
     os.makedirs(log_dir, exist_ok=True)
     filename = f"{category.lower()}.log"
@@ -50,6 +49,7 @@ def write_error_report(category: str, message: str, *, extra: str | None = None)
 
 
 def clear_error_report(category: str) -> str:
+    """Очищает (обнуляет) файл журнала <category>.log и возвращает его путь."""
     log_dir = _log_dir()
     os.makedirs(log_dir, exist_ok=True)
     filename = f"{category.lower()}.log"

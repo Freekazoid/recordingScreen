@@ -42,6 +42,7 @@ def _bundle_roots() -> list[str]:
 
 
 def _from_bundle(path: str, roots: list[str]) -> bool:
+    """Проверяет, лежит ли путь внутри одного из каталогов бандла (с учётом realpath)."""
     if not path:
         return False
     real = os.path.realpath(path)
@@ -87,6 +88,7 @@ def install_subprocess_guard() -> None:
         return
 
     def _merged(user_env):
+        """Объединяет очищенную базу окружения с явно переданным пользовательским env."""
         base = bundle_free_env()
         if user_env is None:
             return base
@@ -100,6 +102,7 @@ def install_subprocess_guard() -> None:
     orig_init = subprocess.Popen.__init__
 
     def patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        """Обёртка над Popen.__init__: подмешивает очищенное окружение и флаг CREATE_NO_WINDOW."""
         kwargs["env"] = _merged(kwargs.get("env"))
         if _CREATE_NO_WINDOW:
             flags = kwargs.get("creationflags", 0)

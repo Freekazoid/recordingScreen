@@ -1,9 +1,10 @@
-"""WASAPI loopback recorder via pyaudiowpatch.
+"""Запись системного звука через WASAPI loopback с pyaudiowpatch.
 
-Usage: python wasapi_loopback_record.py <output.wav> [duration_seconds]
+Использование: python wasapi_loopback_record.py <output.wav> [duration_seconds]
 
-Captures system audio via WASAPI loopback until SIGINT or duration reached.
-Writes PCM s16le stereo WAV at the device's native sample rate.
+Захватывает системный звук через WASAPI loopback до сигнала SIGINT или
+истечения заданной длительности. Пишет PCM s16le stereo WAV с частотой
+дискретизации устройства.
 """
 import signal
 import struct
@@ -15,6 +16,7 @@ _stop = False
 
 
 def _on_signal(sig, frame):
+    """Устанавливает флаг остановки по сигналу (SIGINT/SIGTERM)."""
     global _stop
     _stop = True
 

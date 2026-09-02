@@ -1,4 +1,4 @@
-"""PipeWire-based recorder for Wayland screen capture via GStreamer."""
+"""Рекордер на PipeWire для записи экрана Wayland через GStreamer."""
 
 from __future__ import annotations
 
@@ -18,24 +18,28 @@ try:
 
     Gst.init(None)
     _GST_AVAILABLE = True
-except Exception as exc:  # pragma: no cover - depends on system packages
+except Exception as exc:  # pragma: no cover - зависит от системных пакетов
     Gst = GLib = None
     _GST_ERROR_MESSAGE = str(exc)
 
 
 class WaylandPipewireError(RuntimeError):
-    pass
+    """Ошибка записи экрана Wayland через GStreamer/PipeWire."""
 
 
 def gstreamer_available() -> bool:
+    """True, если доступны привязки GStreamer (Gst/GLib)."""
     return _GST_AVAILABLE
 
 
 def gstreamer_dependency_error() -> str:
-    return _GST_ERROR_MESSAGE or "GStreamer (pipewiresrc) bindings unavailable"
+    """Текст ошибки, если зависимости GStreamer недоступны."""
+    return _GST_ERROR_MESSAGE or "привязки GStreamer (pipewiresrc) недоступны"
 
 
 class WaylandPipewireRecorder:
+    """Записывает поток PipeWire (экран Wayland) в файл через GStreamer."""
+
     def __init__(
         self,
         pipewire_fd: int,
@@ -65,6 +69,7 @@ class WaylandPipewireRecorder:
         self._error_reported = False
 
     def start(self):
+        """Собирает и запускает конвейер GStreamer записи в фоновом потоке."""
         if self._pipeline is not None:
             return
 
@@ -150,6 +155,7 @@ class WaylandPipewireRecorder:
         self._thread.start()
 
     def stop(self, timeout: float = 2.0):
+        """Останавливает запись: завершает цикл и освобождает ресурсы."""
         if self._loop:
             self._loop.quit()
         if self._thread:
@@ -165,13 +171,16 @@ class WaylandPipewireRecorder:
         self._loop = None
 
     def wait(self, timeout: float | None = None) -> bool:
+        """Ждёт завершения записи; возвращает True в случае успеха/завершения в срок."""
         return self._finished_event.wait(timeout)
 
     @property
     def success(self) -> bool:
+        """True, если запись завершилась без ошибок."""
         return self._success
 
     def _on_bus_message(self, _bus, message):
+        """Обрабатывает сообщения шины GStreamer (ошибки и EOS)."""
         msg_type = message.type
         if msg_type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
@@ -189,6 +198,7 @@ class WaylandPipewireRecorder:
                 self._loop.quit()
 
     def _report_error(self, message: str):
+        """Передаёт сообщение об ошибке колбэку, если тот задан."""
         if self._on_error:
             try:
                 self._on_error(message)
@@ -197,6 +207,7 @@ class WaylandPipewireRecorder:
 
     @staticmethod
     def _pipeline_supports_pipewiresrc() -> bool:
+        """Проверяет наличие плагина pipewire в реестре GStreamer."""
         if not gstreamer_available():
             return False
         registry = Gst.Registry.get()

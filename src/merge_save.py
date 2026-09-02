@@ -8,10 +8,12 @@ from ffmpeg_locator import ffmpeg_command, ffprobe_command
 
 
 def _clamp(value, min_value, max_value):
+    """Ограничивает value диапазоном [min_value, max_value]."""
     return max(min_value, min(max_value, value))
 
 
 def _build_video_args(output_format, video_crf):
+    """Собирает аргументы ffmpeg для кодека видео по формату и уровню CRF."""
     fmt = (output_format or "mp4").lower().strip()
     crf = _clamp(int(video_crf), 0, 51)
 
@@ -27,6 +29,7 @@ def _build_video_args(output_format, video_crf):
 
 
 def _build_audio_args(output_format, audio_mode):
+    """Собирает аргументы ffmpeg для аудио по формату и режиму."""
     fmt = (output_format or "mp4").lower().strip()
     mode = (audio_mode or "copy").lower().strip()
 
@@ -46,6 +49,7 @@ def _build_audio_args(output_format, audio_mode):
 
 
 def _run_merge(command):
+    """Запускает команду слияния и возвращает True при успехе."""
     try:
         subprocess.run(command, check=True, capture_output=True)
         return True
@@ -58,6 +62,7 @@ def _run_merge(command):
 
 
 def _probe_video_size(video_path: str) -> tuple[int, int] | None:
+    """Возвращает размеры видео (ширина, высота) через ffprobe или None."""
     ffprobe_bin = ffprobe_command()
     if not os.path.exists(video_path):
         return None
@@ -92,6 +97,7 @@ def _probe_video_size(video_path: str) -> tuple[int, int] | None:
 
 
 def detect_crop(video_path: str, sample_seconds: float = 2.0) -> str | None:
+    """Определяет необходимость обрезки видео через фильтр cropdetect."""
     ffmpeg_bin = ffmpeg_command()
     if not os.path.exists(video_path):
         return None
@@ -142,6 +148,7 @@ def detect_crop(video_path: str, sample_seconds: float = 2.0) -> str | None:
 
 
 def _probe_duration_seconds(path: str) -> float | None:
+    """Возвращает длительность видео в секундах через ffprobe или None."""
     ffprobe_bin = ffprobe_command()
     if not path or not os.path.exists(path):
         return None
@@ -166,7 +173,7 @@ def _probe_duration_seconds(path: str) -> float | None:
 
 
 def _remux_video(video_path: str) -> str | None:
-    """Rewrite container with regenerated timestamps; returns path or None."""
+    """Пересобирает контейнер с пересчитанными таймкодами; возвращает путь или None."""
     ffmpeg_bin = ffmpeg_command()
     repaired = video_path + ".repaired.mkv"
     try:
@@ -199,6 +206,7 @@ def _remux_video(video_path: str) -> str | None:
 
 
 def merge_av(video_path, audio_path, output_path=None, audio_offset=None, output_format="mp4", video_crf=23, audio_mode="copy", video_filter=None):
+    """Объединяет видео и аудио в один файл через ffmpeg."""
     ffmpeg_bin = ffmpeg_command()
 
     if not os.path.exists(video_path):
@@ -239,8 +247,8 @@ def merge_av(video_path, audio_path, output_path=None, audio_offset=None, output
     if audio_args not in (["-an"], ["-c:a", "copy"]):
         command.extend(["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"])
 
-    # Only use -shortest when video looks long enough; otherwise audio would be clipped
-    # to a corrupt near-zero video duration.
+    # -shortest используем только когда видео достаточно длинное, иначе аудио
+    # обрезалось бы до некорректной почти нулевой длительности.
     if audio_mode != "none" and duration and duration >= 0.5:
         command.append("-shortest")
 

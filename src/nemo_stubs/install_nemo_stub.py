@@ -26,6 +26,7 @@ _DST_DIR = os.path.join(
 
 
 def main() -> None:
+    """Копирует файл заглушки телеметрии в site-packages рядом с пакетом nemo, если он ещё не установлен."""
     if not os.path.isdir(os.path.join(_SITE, "nv_one_logger")):
         print("[nemo-stub] nv_one_logger not installed, skipping")
         return

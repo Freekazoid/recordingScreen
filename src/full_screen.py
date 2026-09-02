@@ -9,22 +9,28 @@ from video_writer_utils import create_video_writer
 
 
 class FullScreenMode:
+    """Режим записи всего экрана через mss в отдельном потоке."""
+
     def __init__(self, fps=20):
+        """Сохраняет FPS записи и начальное состояние (запись выключена)."""
         self.is_recording = False
         self.fps = fps
         self.thread = None
 
     def start_recording(self, duration_seconds=None):
+        """Запускает запись всего экрана в фоновом потоке."""
         self.is_recording = True
         self.thread = threading.Thread(target=self._record, args=(duration_seconds,), daemon=True)
         self.thread.start()
 
     def stop_recording(self):
+        """Останавливает запись, дождавшись завершения фонового потока."""
         self.is_recording = False
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=2.0)
 
     def _record(self, duration_seconds=None):
+        """Тело фонового потока: снимает монитор через mss и пишет кадры в видеофайл."""
         filename = "output.mkv"
         with mss.mss() as sct:
             monitor = sct.monitors[0]

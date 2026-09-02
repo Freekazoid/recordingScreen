@@ -33,10 +33,12 @@ class FrameResult:
 
     @property
     def ok(self) -> bool:
+        """True, если кадр получен успешно."""
         return self.data is not None
 
 
 def _gst_frame(node_id: int, fd: int, out: str) -> str | None:
+    """Снимает один кадр через gst-launch-1.0 (pipewiresrc→png): возвращает ошибку или None."""
     import shutil
 
     launch = shutil.which("gst-launch-1.0")
@@ -77,6 +79,7 @@ class _ScreencastWorker:
     """Держит ScreenCast-сессию в отдельном asyncio-цикле."""
 
     def __init__(self) -> None:
+        """Инициализирует состояние сессии (поток, портал, node_id и флаги готовности)."""
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._portal: ScreenCastPortal | None = None
@@ -89,6 +92,7 @@ class _ScreencastWorker:
         self._cv = threading.Condition(threading.Lock())
 
     def _ensure_thread(self) -> asyncio.AbstractEventLoop:
+        """Гарантирует наличие выделенного фонового потока с работающим asyncio-циклом."""
         if self._loop is not None and self._loop.is_running():
             return self._loop
 
@@ -110,11 +114,13 @@ class _ScreencastWorker:
         return self._loop  # type: ignore[return-value]
 
     def _call(self, fn: Callable[[], _T], timeout: float = 30.0) -> _T:
+        """Синхронно вызывает асинхронную функцию в фоновом цикле с таймаутом."""
         loop = self._ensure_thread()
         future = asyncio.run_coroutine_threadsafe(fn(), loop)
         return future.result(timeout=timeout)
 
     def ensure(self) -> FrameResult:
+        """Создаёт ScreenCast-сессию (один раз) и возвращает состояние/ошибку в FrameResult."""
         if self._ready:
             return FrameResult()
         if self._cancelled:
@@ -155,6 +161,7 @@ class _ScreencastWorker:
             return FrameResult(data=None, cancelled=False, error=self._error)
 
     def grab(self) -> FrameResult:
+        """Снимает свежий кадр через сессию и возвращает PNG-байты (или ошибку/отмену) в FrameResult."""
         res = self.ensure()
         if res.error or res.cancelled:
             return res

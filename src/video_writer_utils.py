@@ -1,7 +1,7 @@
 
 import cv2
 
-# Avoid hardware / unavailable codecs that break VideoWriter on Linux/Wayland
+# Избегаем аппаратных/недоступных кодеков, ломающих VideoWriter на Linux/Wayland
 _FOURCC_PREFERENCE = (
     "mp4v",
     "XVID",
@@ -10,6 +10,7 @@ _FOURCC_PREFERENCE = (
 
 
 def sanitize_frame_size(width: int, height: int) -> tuple[int, int]:
+    """Приводит размеры кадра к чётным значениям (минимум 2x2)."""
     w = max(int(width), 2)
     h = max(int(height), 2)
     if w % 2:
@@ -20,6 +21,7 @@ def sanitize_frame_size(width: int, height: int) -> tuple[int, int]:
 
 
 def create_video_writer(filename: str, fps: float, size: tuple[int, int]) -> tuple[cv2.VideoWriter, tuple[int, int], str]:
+    """Создаёт VideoWriter, перебирая кодеки по приоритету; возвращает (writer, размер, кодек)."""
     w, h = sanitize_frame_size(*size)
     frame_size = (w, h)
     last_error = None
@@ -31,7 +33,7 @@ def create_video_writer(filename: str, fps: float, size: tuple[int, int]) -> tup
             if writer.isOpened():
                 return writer, frame_size, code
             writer.release()
-        except Exception as exc:  # noqa: BLE001 - сохранение последней ошибки для отладки
+        except Exception as exc:  # noqa: BLE001 - сохраняем последнюю ошибку для отладки
             last_error = exc
 
     if last_error:

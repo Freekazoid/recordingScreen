@@ -20,12 +20,14 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def _get_base_dir():
+    """Возвращает каталог с ресурсами приложения: в заморозке — _MEIPASS, иначе — корень проекта."""
     if getattr(sys, "frozen", False):
         return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _cleanup_temp_dirs():
+    """Удаляет каталоги временных файлов обработки в рабочем каталоге и каталоге данных."""
     bases = {os.getcwd(), get_writable_base_dir()}
     names = [".temp_postprocess", ".temp_segments", ".temp_audio"]
     for base in bases:
@@ -39,6 +41,7 @@ def _cleanup_temp_dirs():
 
 
 def main():
+    """Точка входа приложения: настраивает окружение, идентичность на Wayland, иконку и запускает главное окно."""
     # Дочерние процессы не должны видеть библиотеки бандла в LD_LIBRARY_PATH
     # (иначе системные утилиты вроде systemd-run падают по версиям символов).
     from proc_env import install_subprocess_guard
@@ -46,7 +49,7 @@ def main():
     install_subprocess_guard()
 
     if getattr(sys, "frozen", False):
-        # Keep system dist-packages out of frozen imports (psutil/ABI clashes).
+        # Убираем системные dist-packages из импортов frozen-сборки (конфликты psutil/ABI).
         meipass = getattr(sys, "_MEIPASS", None)
         cleaned = []
         for entry in sys.path:

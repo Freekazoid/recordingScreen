@@ -182,6 +182,15 @@ if [[ ! -d "$APP_PATH" ]]; then
   exit 1
 fi
 
+# macOS требует NSMicrophoneUsageDescription в Info.plist, иначе запись с
+# микрофона/виртуального устройства (BlackHole) системно отклоняется.
+PLIST_PATH="$APP_PATH/Contents/Info.plist"
+if [[ -f "$PLIST_PATH" ]]; then
+  MIC_DESC="ScreenRecorder записывает звук: микрофон и системный звук."
+  /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string '$MIC_DESC'" "$PLIST_PATH" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription '$MIC_DESC'" "$PLIST_PATH"
+fi
+
 rm -f "$ZIP_PATH"
 ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_PATH"
 

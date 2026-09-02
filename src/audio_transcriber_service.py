@@ -36,8 +36,9 @@ BASE_DIR = get_writable_base_dir()
 PYTHON_VERSION_TAG = f"python{sys.version_info.major}.{sys.version_info.minor}"
 LOCAL_SITE_PACKAGES = os.path.join(BASE_DIR, ".venv", "lib", PYTHON_VERSION_TAG, "site-packages")
 if os.path.isdir(LOCAL_SITE_PACKAGES) and LOCAL_SITE_PACKAGES not in sys.path:
-    # Frozen builds prefer the bundled venv. In normal/dev runs append so a
-    # working user-site transformers is not shadowed by a broken project .venv.
+    # Frozen-сборки предпочитают встроенный venv. В обычных/dev-запусках
+    # добавляем в конец, чтобы рабочий user-site transformers не затенялся
+    # сломанным проектным .venv.
     if getattr(sys, "frozen", False):
         sys.path.insert(0, LOCAL_SITE_PACKAGES)
     else:
@@ -52,6 +53,7 @@ if os.path.isdir(TORCH_LIB_DIR):
 _MODEL_DIR = os.path.join(BASE_DIR, "model")
 
 def _build_vosk_paths(model_dir):
+    """Возвращает список возможных путей к русской модели Vosk в каталоге модели."""
     return [
         os.path.join(model_dir, "vosk-model-ru-0.42.zip"),
         os.path.join(model_dir, "vosk-model-ru-0.42"),
@@ -73,6 +75,7 @@ WHISPERX_VRAM_REQUIRED_GB = 4.0
 NEMO_VRAM_REQUIRED_GB = 3.0
 
 def _build_nemo_model_paths(model_dir):
+    """Возвращает список возможных путей к модели NeMo Sortformer, включая путь в sys._MEIPASS для frozen-сборок."""
     return [
         os.path.join(model_dir, NEMO_MODEL_DIRNAME, NEMO_MODEL_FILE),
         os.path.join(model_dir, NEMO_MODEL_FILE),
@@ -82,6 +85,7 @@ def _build_nemo_model_paths(model_dir):
 NEMO_MODEL_PATHS = _build_nemo_model_paths(_MODEL_DIR)
 
 def set_model_dir(model_dir):
+    """Обновляет каталог с моделями и пересобирает списки путей к моделям Vosk и NeMo."""
     global _MODEL_DIR, VOSK_MODEL_PATHS, NEMO_MODEL_PATHS
     _MODEL_DIR = model_dir
     VOSK_MODEL_PATHS = _build_vosk_paths(_MODEL_DIR)
@@ -111,6 +115,7 @@ def _patch_torchaudio_load():
         import torch as _torch
 
         def _load_soundfile(uri, *args, **kwargs):
+            """Читает аудиофайл через soundfile и возвращает тензор [каналы, кадры] и частоту."""
             data, sr = _sf.read(str(uri), dtype="float32", always_2d=True)
             return _torch.from_numpy(data.T), sr
 
@@ -140,6 +145,7 @@ class AudioTranscriberService:
         include_timecodes=False,
         compute_device="auto",
     ):
+        """Инициализирует сервис: сохраняет настройки ASR, нормализует ограничения по числу спикеров и выбирает безопасное устройство (GPU/CPU)."""
         _patch_torchaudio_load()
         self.auth_token = auth_token
         self.whisper_model_path = whisper_model_path
@@ -173,6 +179,7 @@ class AudioTranscriberService:
             self._ensure_vad_ready()
 
     def _normalize_speaker_count(self, value) -> int | None:
+        """Приводит заданное число спикеров к положительному целому; возвращает None, если значение не задано или некорректно."""
         if value is None:
             return None
         if isinstance(value, str):
@@ -188,6 +195,7 @@ class AudioTranscriberService:
         return count
 
     def _sanitize_speaker_constraints(self):
+        """Приводит ограничения по числу спикеров к согласованному виду: ожидаемое число задаёт фиксированный диапазон, иначе меняет местами min/max при их противоречии."""
         if self.expected_speakers is not None:
             self.min_speakers = self.expected_speakers
             self.max_speakers = self.expected_speakers
@@ -196,6 +204,7 @@ class AudioTranscriberService:
             self.min_speakers, self.max_speakers = self.max_speakers, self.min_speakers
 
     def _check_nemo_dependencies(self) -> bool:
+        """Проверяет наличие файла модели NeMo среди возможных путей; сообщает о недоступности и возвращает False, если файла нет."""
         for path in NEMO_MODEL_PATHS:
             if path and os.path.isfile(path):
                 return True
@@ -205,6 +214,7 @@ class AudioTranscriberService:
         return False
 
     def _ensure_nemo_ready(self) -> bool:
+        """Выполняет ленивый импорт NeMo (через nemo_compat) и сохраняет ошибку импорта; возвращает True при успехе."""
         try:
             import nemo_compat
             nemo_compat.ensure_nemo_imports()
@@ -423,10 +433,12 @@ class AudioTranscriberService:
         return self._normalize_speaker_segments(collapsed)
 
     def _diarize_with_nemo(self, input_file: str, output_file: str, append=False):
+        """Выполняет диаризацию через NeMo и записывает готовый транскрипт по спикерам в output_file."""
         segments = self._nemo_turns(input_file)
         return self._build_speaker_transcript(input_file, segments, output_file, append=append)
 
     def _check_vad_dependencies(self) -> bool:
+        """Проверяет доступность модулей последовательной диаризации (diarize/torchaudio), подменяя torchaudio.load; возвращает True при успехе."""
         try:
             import diarize  # noqa: F401
             import torchaudio  # noqa: F401
@@ -438,18 +450,21 @@ class AudioTranscriberService:
             return False
 
     def _ensure_vad_ready(self) -> bool:
+        """Проверяет готовность модулей диаризации один раз и кэширует результат."""
         if not self._vad_check_done:
             self._vad_ready = self._check_vad_dependencies()
             self._vad_check_done = True
         return self._vad_ready
 
     def _is_silent(self, waveform: np.ndarray, threshold: float = 5e-4) -> bool:
+        """Возвращает True, если RMS-уровень сигнала ниже порога (тишина) или сигнал пуст."""
         if waveform.size == 0:
             return True
         rms = float(np.sqrt(np.mean(np.square(waveform))))
         return rms < threshold
 
     def _save_silence_notice(self, output_file: str, append: bool = False):
+        """Записывает в output_file сообщение о том, что сигнал отсутствует (при append дописывает к файлу)."""
         message = "Аудио не содержит различимого сигнала. Распознавание не выполнено.\n"
         mode = "a" if append and os.path.exists(output_file) else "w"
         with open(output_file, mode, encoding="utf-8") as f:
@@ -457,6 +472,7 @@ class AudioTranscriberService:
         return output_file
 
     def _compute_simple_features(self, chunk: np.ndarray) -> np.ndarray:
+        """Считает простые признаки блока (энергия, частота пересечений нуля, спектральный поток) для последующей кластеризации."""
         if chunk.size == 0:
             return np.zeros(3, dtype=np.float32)
         energy = float(np.mean(np.abs(chunk)))
@@ -467,6 +483,7 @@ class AudioTranscriberService:
         return np.array([energy, zcr, spectral_flux], dtype=np.float32)
 
     def _kmeans_labels(self, normalized: np.ndarray, k: int) -> np.ndarray:
+        """Выполняет итеративный k-means (до 15 итераций) по нормированным признакам и возвращает метки кластеров."""
         centers = normalized[np.linspace(0, normalized.shape[0] - 1, k, dtype=int)]
         labels = np.zeros(normalized.shape[0], dtype=np.int32)
         for _ in range(15):
@@ -485,6 +502,7 @@ class AudioTranscriberService:
         return labels
 
     def _silhouette_score(self, data: np.ndarray, labels: np.ndarray) -> float:
+        """Вычисляет силуэтный коэффициент для оценки качества разбиения; возвращает -1.0, если кластеров меньше двух или данных мало."""
         unique = np.unique(labels)
         if unique.size < 2:
             return -1.0
@@ -514,6 +532,7 @@ class AudioTranscriberService:
         return total / n
 
     def _resolve_cluster_range(self, n_samples: int) -> tuple[int, int]:
+        """Определяет диапазон числа кластеров: при известном ожидаемом числе спикеров фиксирует его, иначе использует min/max с рамками по числу фрагментов."""
         if n_samples <= 1:
             return 1, 1
         if self.expected_speakers is not None:
@@ -526,6 +545,7 @@ class AudioTranscriberService:
         return min_k, max_k
 
     def _cluster_speakers(self, features: list[np.ndarray]) -> list[int]:
+        """Кластеризует признаки блоков и возвращает метку спикера (с единицы) для каждого блока, выбирая k с лучшим силуэтным коэффициентом."""
         if not features:
             return []
         data = np.vstack(features)
@@ -560,6 +580,7 @@ class AudioTranscriberService:
         return speaker_ids
 
     def _log_progress(self, message: str):
+        """Пишет сообщение прогресса через колбэк (если задан) или в stdout."""
         text = f"[Transcriber] {message}"
         if self._log_callback:
             try:
@@ -570,6 +591,7 @@ class AudioTranscriberService:
         print(text)
 
     def _prepare_audio_source(self, input_file: str):
+        """Если входной файл не .wav, конвертирует его в моно WAV 16 кГц через ffmpeg; возвращает путь к аудио и временный каталог."""
         ext = os.path.splitext(input_file)[1].lower()
         if ext == ".wav":
             return input_file, None
@@ -592,6 +614,7 @@ class AudioTranscriberService:
         return temp_path, temp_dir
 
     def _load_vosk_model(self):
+        """Загружает модель Vosk один раз (по первому существующему пути) и возвращает True при успехе."""
         if self._vosk_model is not None:
             return True
 
@@ -608,11 +631,12 @@ class AudioTranscriberService:
             return False
 
     def _ensure_whisper_dependencies(self):
+        """Гарантирует импорт transformers для Whisper; возвращает True при успехе."""
         global WhisperProcessor, WhisperForConditionalGeneration
         if WhisperProcessor is not None and WhisperForConditionalGeneration is not None:
             return True
 
-        # Frozen AppImage must not use system dist-packages (wrong psutil ABI).
+        # Frozen AppImage не должен использовать системные dist-packages (не та ABI psutil).
         if getattr(sys, "frozen", False):
             for entry in list(sys.path):
                 norm = os.path.normpath(entry or "")
@@ -623,7 +647,7 @@ class AudioTranscriberService:
                         pass
             for mod in list(sys.modules):
                 if mod == "psutil" or mod.startswith("psutil."):
-                    # Drop a previously injected system psutil before transformers import.
+                    # Убираем ранее подмешанный системный psutil перед импортом transformers.
                     if getattr(sys.modules[mod], "__file__", None) and "/usr/lib/python" in str(
                         sys.modules[mod].__file__
                     ):
@@ -643,7 +667,7 @@ class AudioTranscriberService:
             self._whisper_import_error = str(e)
             self._log_progress(f"Whisper недоступен: {e}")
 
-        # Retry after dropping a broken project .venv transformers from path/cache.
+        # Повторяем после удаления сломанных .venv transformers из пути/кэша.
         removed = False
         if LOCAL_SITE_PACKAGES in sys.path:
             try:
@@ -669,6 +693,7 @@ class AudioTranscriberService:
                 sys.path.append(LOCAL_SITE_PACKAGES)
 
     def load_models(self):
+        """Загружает процессор и модель Whisper (локально или с Hugging Face), перебирая подходящие варианты; возвращает True при успехе."""
         if self.model is not None and self.processor is not None:
             return True
         if not self._ensure_whisper_dependencies():
@@ -732,6 +757,7 @@ class AudioTranscriberService:
         return False
 
     def split_audio(self, input_file, segment_length=180, output_dir=".temp_segments"):
+        """Делит аудио на сегменты заданной длины и сохраняет их как WAV-файлы, возвращая список с путями и таймингами."""
         os.makedirs(output_dir, exist_ok=True)
 
         if not os.path.exists(input_file):
@@ -778,12 +804,14 @@ class AudioTranscriberService:
 
     @staticmethod
     def _format_timecode(seconds: float) -> str:
+        """Преобразует секунды в таймкод вида ЧЧ:ММ:СС."""
         total = int(round(max(0.0, seconds)))
         hours, rem = divmod(total, 3600)
         minutes, secs = divmod(rem, 60)
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
     def save_results(self, transcripts, output_file, append=False, include_speaker_labels=True, include_timecodes=None):
+        """Сохраняет транскрипты в файл, сортируя по времени и добавляя метки спикеров и таймкоды при необходимости."""
         if not transcripts:
             return
 
@@ -808,6 +836,7 @@ class AudioTranscriberService:
                 f.write(f"{prefix}{text}\n\n")
 
     def save_speaker_segments(self, segments, output_file, append=False):
+        """Сохраняет разбиение по спикерам в файл с интервалами времени и метками спикеров."""
         mode = "a" if append and os.path.exists(output_file) else "w"
         with open(output_file, mode, encoding="utf-8") as f:
             if mode == "w":
@@ -819,10 +848,12 @@ class AudioTranscriberService:
                 f.write(f"**{speaker}** [{start} - {end}]\n\n")
 
     def cleanup(self, temp_dir):
+        """Удаляет временный каталог (если он существует)."""
         if temp_dir and os.path.isdir(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _get_safe_device(self):
+        """Возвращает torch.device, выбирая между CUDA/MPS/CPU в зависимости от настроек и доступности."""
         pref = self.compute_device or "auto"
         if pref == "cpu":
             self._log_progress("GPU отключено пользователем — CPU")
@@ -872,6 +903,7 @@ class AudioTranscriberService:
         return False
 
     def _load_waveform(self, input_file: str, target_sr: int | None = 16000, force_mono: bool = True):
+        """Читает аудио через soundfile, при необходимости сводит к одному каналу и пересэмплирует к целевой частоте; возвращает float32-массив и частоту."""
         data, sr = sf.read(input_file)
         if data.ndim > 1 and force_mono:
             data = np.mean(data, axis=1)
@@ -927,6 +959,7 @@ class AudioTranscriberService:
                 self.cleanup(audio_temp_dir)
 
     def _transcribe_speakers_only(self, input_file: str, output_file: str, append=False):
+        """Выполняет только выделение спикеров (без текста) выбранным методом (diarize или NeMo) и записывает результат."""
         if self.diarization_method == "diarize":
             if not self._ensure_vad_ready():
                 raise RuntimeError("Модуль diarize недоступен")
@@ -940,6 +973,7 @@ class AudioTranscriberService:
         raise RuntimeError("Метод разбиения по спикерам не выбран")
 
     def _diarize_with_diarize(self, input_file: str, output_file: str, append=False):
+        """Запускает диаризацию модулем diarize с учётом ограничений по числу спикеров и формирует транскрипт."""
         import diarize
 
         kwargs = {}
@@ -1165,6 +1199,7 @@ class AudioTranscriberService:
         return best_speaker
 
     def _group_words_into_phrases(self, words: list[dict]) -> list[dict]:
+        """Объединяет слова одного спикера в фразы, разрывая их при паузе более 1.5 с или смене спикера."""
         phrases = []
         current = None
         for w in words:
@@ -1186,6 +1221,7 @@ class AudioTranscriberService:
         return phrases
 
     def _normalize_speaker_segments(self, segments: list[dict]) -> list[dict]:
+        """Упорядочивает сегменты по времени, склеивает соседние реплики одного спикера и сглаживает метки по требуемому числу и доле спикеров."""
         if not segments:
             return []
 
@@ -1287,6 +1323,7 @@ class AudioTranscriberService:
         return compact
 
     def _transcribe_chunk_vosk(self, chunk: np.ndarray, sr: int) -> str:
+        """Распознаёт текст фрагмента аудио через Vosk (приводя к 16 кГц mono PCM) и возвращает распознанную строку."""
         if not self._load_vosk_model():
             raise RuntimeError("Не удалось загрузить модель Vosk")
         try:
@@ -1310,6 +1347,7 @@ class AudioTranscriberService:
         return result.get("text", "").strip()
 
     def _transcribe_chunk_whisper(self, chunk: np.ndarray, sr: int) -> str:
+        """Распознаёт текст фрагмента аудио через модель Whisper и возвращает строку."""
         if not self.load_models():
             details = f": {self._whisper_import_error}" if self._whisper_import_error else ""
             raise RuntimeError(f"Whisper недоступен{details}")
@@ -1333,6 +1371,7 @@ class AudioTranscriberService:
         return text.strip()
 
     def _build_speaker_transcript(self, input_file: str, segments: list[dict], output_file: str, append=False):
+        """Для каждого сегмента спикера распознаёт текст (Whisper или Vosk) и собирает итоговый транскрипт со спикерами."""
         waveform, sr = self._load_waveform(input_file, target_sr=16000, force_mono=True)
         if waveform.size == 0:
             raise RuntimeError("Аудио пустое")
@@ -1403,6 +1442,7 @@ class AudioTranscriberService:
         return output_file
 
     def _merge_single_speaker_phrases(self, transcripts: list[dict]) -> list[dict]:
+        """Склеивает реплики, когда спикер один, разделяя их только при заметных паузах или длинных строках."""
         if not transcripts:
             return transcripts
 
@@ -1453,6 +1493,7 @@ class AudioTranscriberService:
         transcripts = []
 
         def _handle_result(raw_json: str):
+            """Разбирает строку с JSON-результатом Vosk и добавляет реплику в transcripts."""
             try:
                 result = json.loads(raw_json)
             except Exception:

@@ -22,6 +22,7 @@ VOSK_EXTRACTED_DIR = "vosk-model-ru-0.42"
 VOSK_REQUIRED_ITEMS = ["am", "conf", "graph", "ivector"]
 
 def _build_model_specs(model_dir):
+    """Собирает описание моделей (репозитории, пути и паттерны файлов) для каталога model_dir."""
     return {
         "whisper": {
             "repo_id": "openai/whisper-medium",
@@ -81,6 +82,7 @@ def _build_model_specs(model_dir):
 MODEL_SPECS = _build_model_specs(_MODEL_DIR)
 
 def set_model_dir(model_dir):
+    """Меняет каталог моделей и пересобирает MODEL_SPECS."""
     global _MODEL_DIR, MODEL_SPECS
     _MODEL_DIR = model_dir
     MODEL_SPECS = _build_model_specs(_MODEL_DIR)
@@ -131,6 +133,7 @@ def resolve_models_path(models_dir_setting):
 
 
 def get_model_dir():
+    """Возвращает текущий каталог моделей."""
     return _MODEL_DIR
 
 MODEL_REQUIRED_FILES = {
@@ -153,9 +156,11 @@ MODEL_REQUIRED_FILES = {
 }
 
 def is_whisper_downloaded():
+    """Проверяет, скачана ли модель Whisper."""
     return is_model_downloaded("whisper")
 
 def is_vosk_downloaded():
+    """Проверяет, скачана ли модель Vosk (в zip или распакованном виде)."""
     candidates = [
         os.path.join(get_model_dir(), VOSK_MODEL_LOCAL),
         os.path.join(get_model_dir(), VOSK_EXTRACTED_DIR),
@@ -169,6 +174,7 @@ def is_vosk_downloaded():
     return False
 
 def is_pyannote_downloaded():
+    """Проверяет, скачана ли модель PyAnnote."""
     return is_model_downloaded("pyannote")
 
 def delete_model(model_name):
@@ -204,9 +210,11 @@ def delete_model(model_name):
     return removed
 
 def is_nemo_downloaded():
+    """Проверяет, скачана ли модель NeMo."""
     return is_model_downloaded("nemo")
 
 def get_model_status():
+    """Возвращает словарь статусов скачивания всех моделей."""
     return {
         "whisper": is_whisper_downloaded(),
         "whisperx": is_model_downloaded("whisperx"),
@@ -216,7 +224,7 @@ def get_model_status():
     }
 
 def download_model(model_name, token, log_func, progress_func=None):
-    """Download specific model."""
+    """Скачивает указанную модель (кроме Vosk). Возвращает True при успехе."""
     if model_name == "vosk":
         return download_vosk_model(log_func, progress_func)
 
@@ -271,6 +279,7 @@ def _download_vosk_from_hf(extract_tmp: str, log_func, progress_func=None) -> bo
         return False
 
     class _ProgressTqdm(tqdm):
+        """Прогресс-бар tqdm, передающий процент загрузки в progress_func."""
         def update(self, n=1):
             super().update(n)
             if progress_func and self.total:
@@ -295,7 +304,7 @@ def _download_vosk_from_hf(extract_tmp: str, log_func, progress_func=None) -> bo
 
 
 def download_vosk_model(log_func, progress_func=None):
-    """Download Vosk model from official website."""
+    """Скачивает модель Vosk с официального сайта (через HF-зеркало при недоступности)."""
     import urllib.request
     import zipfile
 
@@ -448,6 +457,7 @@ def download_vosk_model(log_func, progress_func=None):
             shutil.rmtree(extract_tmp, ignore_errors=True)
 
 def _try_keyring(service="recordingScreen", key="hf_token"):
+    """Читает токен из системного хранилища keyring; None при недоступности."""
     try:
         import keyring
         return keyring.get_password(service, key)
@@ -455,6 +465,7 @@ def _try_keyring(service="recordingScreen", key="hf_token"):
         return None
 
 def _save_keyring(token, service="recordingScreen", key="hf_token"):
+    """Сохраняет токен в системное хранилище keyring; False при недоступности."""
     try:
         import keyring
         keyring.set_password(service, key, token.strip())
@@ -463,6 +474,7 @@ def _save_keyring(token, service="recordingScreen", key="hf_token"):
         return False
 
 def save_hf_token(token):
+    """Сохраняет HF-токен в keyring или в файл с правами 0600."""
     if _save_keyring(token):
         return
     os.makedirs(os.path.dirname(HF_TOKEN_FILE) or ".", exist_ok=True)
@@ -474,6 +486,7 @@ def save_hf_token(token):
         pass
 
 def load_hf_token():
+    """Возвращает HF-токен из keyring или файла; None, если не найден."""
     stored = _try_keyring()
     if stored:
         return stored
@@ -483,12 +496,13 @@ def load_hf_token():
     return None
 
 def is_model_downloaded(model_key):
+    """Проверяет наличие скачанной модели по ключу и требуемым файлам."""
     if model_key == "vosk":
         return is_vosk_downloaded()
 
     spec = MODEL_SPECS.get(model_key)
     if spec is None:
-        # support legacy repo ids
+        # поддерживаем легаси-идентификаторы репозиториев
         for candidate in MODEL_SPECS.values():
             if candidate["repo_id"] == model_key:
                 spec = candidate
@@ -512,7 +526,9 @@ def check_and_download_models_async(
     model_status_canvas, oval, model_status_text, model_status_color,
     recording_status_text, downloading_flag
 ):
+    """Проверяет и при необходимости докачивает модели в фоновом потоке."""
     def worker():
+        """Фоновая задача: запрашивает токен и скачивает все модели."""
         set_model_status("downloading")
         downloading_flag["running"] = True
         os.makedirs(get_model_dir(), exist_ok=True)
@@ -520,6 +536,7 @@ def check_and_download_models_async(
         if not token:
             token = None
             def get_token_from_user():
+                """Запрашивает HF-токен у пользователя через GUI."""
                 nonlocal token
                 token = ask_hf_token_gui(root)
             root.after(0, get_token_from_user)
@@ -529,12 +546,13 @@ def check_and_download_models_async(
             if token:
                 save_hf_token(token)
         def ui_log(message):
+            """Логирует сообщение в GUI-интерфейс через root.after."""
             root.after(0, lambda m=message: log(m))
 
         for key in MODEL_SPECS.keys():
             download_model(key, token, ui_log)
 
-        # Download Vosk model
+        # Скачиваем модель Vosk
         if not is_vosk_downloaded():
             root.after(0, lambda: log("Скачиваем Vosk..."))
             try:
@@ -545,7 +563,7 @@ def check_and_download_models_async(
             root.after(0, lambda: log("Vosk модель уже есть."))
 
         downloading_flag["running"] = False
-        # Check final status
+        # Проверяем итоговый статус
         hf_ready = all(is_model_downloaded(key) for key in MODEL_SPECS)
         vosk_ready = is_vosk_downloaded()
 
@@ -558,7 +576,7 @@ def check_and_download_models_async(
         else:
             root.after(0, lambda: set_model_status("not_ready"))
 
-    # Check initial status
+    # Проверяем начальный статус
     hf_ready = all(is_model_downloaded(key) for key in MODEL_SPECS)
     vosk_ready = is_vosk_downloaded()
 

@@ -28,6 +28,7 @@ _SCOPE_RE = re.compile(r"/app-(?P<id>[A-Za-z0-9.]+(?:_[A-Za-z0-9.]+)?)-\d+\.scop
 
 
 def _dbg(msg: str) -> None:
+    """Пишет диагностическое сообщение в отчёт ошибок, игнорируя сбои записи."""
     try:
         write_error_report("area_select", msg)
     except Exception:

@@ -25,7 +25,7 @@ from PIL import Image, ImageTk
 from video_writer_utils import create_video_writer
 
 
-# Win32 константы
+# Win32-константы
 PW_RENDERFULLCONTENT = 0x00000002
 DWM_CLOAKED = 14
 GWL_EXSTYLE = -20
@@ -34,18 +34,23 @@ WS_EX_APPWINDOW = 0x00040000
 
 
 def _user32():
+    """Возвращает модуль user32 из Win32 API."""
     return ctypes.windll.user32
 
 
 def _gdi32():
+    """Возвращает модуль gdi32 из Win32 API."""
     return ctypes.windll.gdi32
 
 
 def _dwmapi():
+    """Возвращает модуль dwmapi из Win32 API."""
     return ctypes.windll.dwmapi
 
 
 class _RECT(ctypes.Structure):
+    """Прямоугольник в экранных координатах (левый/верхний/правый/нижний)."""
+
     _fields_ = [("left", wt.LONG), ("top", wt.LONG), ("right", wt.LONG), ("bottom", wt.LONG)]
 
 
@@ -72,6 +77,7 @@ def _is_cloaked(hwnd) -> bool:
 
 
 def _get_window_title(hwnd) -> str:
+    """Возвращает заголовок окна по его HWND."""
     u = _user32()
     n = u.GetWindowTextLengthW(hwnd)
     buf = ctypes.create_unicode_buffer(n + 1)
@@ -80,6 +86,7 @@ def _get_window_title(hwnd) -> str:
 
 
 def _get_window_pid(hwnd) -> int:
+    """Возвращает PID процесса, которому принадлежит окно."""
     u = _user32()
     pid = wt.DWORD(0)
     u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
@@ -95,6 +102,7 @@ def _list_top_windows() -> list[tuple[int, str, int]]:
 
     @EnumWindowsProc
     def _cb(hwnd, lparam):
+        """Колбэк EnumWindows: отбирает видимые окна с заголовком и PID в список."""
         if not u.IsWindowVisible(hwnd):
             return True
         if _is_cloaked(hwnd):
@@ -116,6 +124,7 @@ class WindowsProgramScreenMode:
     """Режим записи выбранного окна на Windows."""
 
     def __init__(self, root, on_start_callback, fps=20):
+        """Инициализирует режим и сразу запускает показ окна выбора окна для записи."""
         self.thread = None
         self.selected_window_info = None
         self.is_recording = False
@@ -128,6 +137,7 @@ class WindowsProgramScreenMode:
 
     # ── Список окон ──────────────────────────────────────────────────────────
     def list_windows_with_pid(self):
+        """Возвращает список (HWND, заголовок, PID) видимых окон верхнего уровня."""
         return _list_top_windows()
 
     def get_window_info(self, hwnd):
@@ -204,6 +214,7 @@ class WindowsProgramScreenMode:
 
     # ── UI выбора окна ───────────────────────────────────────────────────────
     def start_recording(self):
+        """Показывает окно со списком доступных окон; по выбору окна запускает запись."""
         windows = self.list_windows_with_pid()
         if not windows:
             messagebox.showinfo("Нет окон", "Нет доступных окон для захвата.")
@@ -227,6 +238,7 @@ class WindowsProgramScreenMode:
         scrollbar.pack(side="right", fill="y")
 
         def _on_mousewheel(event, canvas=canvas):
+            """Прокручивает список окон колёсиком мыши."""
             try:
                 if event.delta:
                     canvas.yview_scroll(-1 * int(event.delta / 120), "units")
@@ -243,6 +255,7 @@ class WindowsProgramScreenMode:
         sel_root.bind("<Button-5>", _on_mousewheel)
 
         def select_window(hwnd):
+            """Обрабатывает выбор окна: получает геометрию, закрывает окно и запускает запись."""
             win_info = self.get_window_info(hwnd)
             try:
                 sel_root.grab_release()
@@ -316,6 +329,7 @@ class WindowsProgramScreenMode:
 
     # ── Поток записи ─────────────────────────────────────────────────────────
     def _run_record_thread(self, window_info):
+        """Запускает фоновый поток записи выбранного окна в видеофайл."""
         filename = "output.mkv"
         raw_w = int(window_info["width"])
         raw_h = int(window_info["height"])
@@ -325,6 +339,7 @@ class WindowsProgramScreenMode:
             return
 
         def record():
+            """Тело потока записи: снимает окно с заданным FPS и пишет кадры до остановки."""
             print(f"Запись окна {hex(window_info['window_id'])} в файл {filename}")
             try:
                 out, (target_w, target_h), codec = create_video_writer(filename, self.fps, (raw_w, raw_h))
@@ -357,10 +372,12 @@ class WindowsProgramScreenMode:
         self.thread.start()
 
     def _end_select(self, recording_started: bool):
+        """Завершает выбор окна и вызывает колбэк о том, стартовала ли запись."""
         if self.on_start_callback:
             self.on_start_callback(recording_started)
 
     def stop_recording(self):
+        """Останавливает запись окна, дождавшись завершения фонового потока."""
         self.is_recording = False
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=2.0)

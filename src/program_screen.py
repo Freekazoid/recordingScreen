@@ -14,6 +14,7 @@ from video_writer_utils import create_video_writer
 
 
 def get_icon_for_pid(pid):
+    """Находит путь к значку программы по её PID (через /proc и стандартные каталоги иконок)."""
     exe_path = None
     icon_path = None
     try:
@@ -44,6 +45,7 @@ def get_icon_for_pid(pid):
     return icon_path
 
 def get_icon_from_window(win_id):
+    """Достаёт иконку окна из атрибута _NET_WM_ICON (самую крупную) как PIL-изображение."""
     try:
         d = display.Display()
         window = d.create_resource_object('window', win_id)
@@ -71,7 +73,10 @@ def get_icon_from_window(win_id):
         return None
 
 class ProgramScreenMode:
+    """Режим записи выбранного окна на X11: список окон, захват и запись."""
+
     def __init__(self, root, on_start_callback, fps=20):
+        """Инициализирует режим и сразу запускает показ окна выбора окна для записи."""
         self.thread = None
         self.selected_window_info = None
         self.is_recording = False
@@ -82,12 +87,14 @@ class ProgramScreenMode:
         self.start_recording()
 
     def list_windows_with_pid(self):
+        """Возвращает список (id, заголовок, PID) окон: через X11, а при неудаче — wmctrl."""
         windows = self._list_windows_via_x11()
         if windows:
             return windows
         return self._list_windows_via_wmctrl()
 
     def _list_windows_via_x11(self) -> list[tuple[int, str, int]]:
+        """Собирает видимые окна с PID и заголовком напрямую через Xlib."""
         try:
             d = display.Display()
         except Exception as exc:
@@ -167,6 +174,7 @@ class ProgramScreenMode:
                 pass
 
     def _extract_window_title(self, window, name_atoms: list[int]) -> str:
+        """Извлекает заголовок окна, перебирая переданные атрибуты имени (до первого заполненного)."""
         title = ""
         for atom in name_atoms:
             if not atom:
@@ -203,6 +211,7 @@ class ProgramScreenMode:
         return title
 
     def _list_windows_via_wmctrl(self) -> list[tuple[int, str, int]]:
+        """Возвращает список (id, заголовок, PID) окон через утилиту wmctrl."""
         try:
             output = subprocess.check_output(['wmctrl', '-lp'], stderr=subprocess.DEVNULL)
         except FileNotFoundError:
@@ -231,6 +240,7 @@ class ProgramScreenMode:
         return windows
 
     def get_window_info(self, win_id):
+        """Возвращает геометрию окна в экранных координатах (с учётом вложенных родителей)."""
         try:
             d = display.Display()
             window = d.create_resource_object('window', win_id)
@@ -261,6 +271,7 @@ class ProgramScreenMode:
             return None
 
     def capture_window_area(self, window_info):
+        """Снимает содержимое окна через XGetImage и возвращает numpy-массив BGRA."""
         try:
             d = display.Display()
             window = d.create_resource_object('window', window_info['window_id'])
@@ -276,6 +287,7 @@ class ProgramScreenMode:
             return None
 
     def start_recording(self):
+        """Показывает окно со списком доступных окон; по выбору окна запускает запись."""
         windows = self.list_windows_with_pid()
         if not windows:
             messagebox.showinfo("Нет окон", "Нет доступных окон для захвата.")
@@ -301,6 +313,7 @@ class ProgramScreenMode:
         scrollbar.pack(side="right", fill="y")
 
         def _on_mousewheel(event, canvas=canvas):
+            """Прокручивает список окон колёсиком мыши."""
             # Обработка прокрутки мыши
             try:
                 if event.delta:
@@ -319,6 +332,7 @@ class ProgramScreenMode:
         sel_root.bind("<Button-5>", _on_mousewheel)
 
         def select_window(winid):
+            """Обрабатывает выбор окна: получает геометрию, закрывает окно и запускает запись."""
             win_info = self.get_window_info(winid)
             try:
                 sel_root.grab_release()
@@ -404,6 +418,7 @@ class ProgramScreenMode:
         sel_root.protocol("WM_DELETE_WINDOW", on_close)
 
     def _run_record_thread(self, window_info):
+        """Запускает фоновый поток записи выбранного окна в видеофайл."""
         filename = "output.mkv"
         raw_w = int(window_info['width'])
         raw_h = int(window_info['height'])
@@ -413,6 +428,7 @@ class ProgramScreenMode:
             return
 
         def record():
+            """Тело потока записи: снимает окно с заданным FPS и пишет кадры до остановки."""
             print(f"Запись области окна {hex(window_info['window_id'])} начата в файл {filename}")
             try:
                 out, (target_w, target_h), codec = create_video_writer(filename, self.fps, (raw_w, raw_h))
@@ -446,10 +462,12 @@ class ProgramScreenMode:
         self.thread.start()
 
     def _end_select(self, recording_started: bool):
+        """Завершает выбор окна и вызывает колбэк о том, стартовала ли запись."""
         if self.on_start_callback:
             self.on_start_callback(recording_started)
 
     def stop_recording(self):
+        """Останавливает запись окна, дождавшись завершения фонового потока."""
         self.is_recording = False
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=2.0)

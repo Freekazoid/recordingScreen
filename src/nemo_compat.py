@@ -19,6 +19,7 @@ _STUB_MODULE = "nv_one_logger.training_telemetry.integration.pytorch_lightning"
 
 
 def _make_stub():
+    """Создаёт и подставляет в sys.modules заглушку телеметрии nv_one_logger, чтобы NeMo импортировался без PyPI-пакета."""
     integration = types.ModuleType(
         "nv_one_logger.training_telemetry.integration"
     )
@@ -30,7 +31,9 @@ def _make_stub():
             pass
 
     class TimeEventCallback(_Base):
+        """Заглушка колбэка PyTorch Lightning, имитирующая оригинальный TimeEventCallback из телеметрии NeMo."""
         def __init__(self, *args, **kwargs):
+            """Инициализирует колбэк без параметров, допуская сбой базового конструктора."""
             try:
                 super().__init__()
             except Exception:

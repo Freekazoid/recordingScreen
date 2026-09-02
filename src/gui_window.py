@@ -11,7 +11,7 @@ from datetime import datetime
 from tkinter import filedialog, ttk
 from typing import Any
 
-from app_paths import safe_timestamp
+from app_paths import get_writable_base_dir, safe_timestamp
 
 from PIL import Image, ImageTk
 
@@ -155,6 +155,7 @@ AUDIO_TRACK_LABEL_TO_MODE = {
 }
 
 def ask_hf_token_gui(root) -> str | None:
+    """Диалоговое окно ввода токена HuggingFace. Возвращает введённый токен или None при отмене."""
     import webbrowser
     from tkinter import CENTER, Button, Entry, Label, StringVar, Toplevel
 
@@ -273,7 +274,9 @@ def _check_disk_space(min_gb: float = 1.0) -> bool:
 
 
 class AppWindow:
+    """Главное окно приложения-рекордера экрана на Tkinter: управляет записью, настройками и постобработкой."""
     def __init__(self, root):
+        """Инициализация главного окна и всех виджетов интерфейса, загрузка настроек и запуск фоновых задач."""
         self.root = root
         self.audio_recorder = AudioRecorder(filename=AUDIO_OUTPUT)
         self.current_mode: dict[str, str | None] = {"mode": None}
@@ -316,10 +319,11 @@ class AppWindow:
             compute_device = "auto"
         self.compute_device = tk.StringVar(value=compute_device)
 
-        models_dir = str(settings.get("models_dir", "")).strip()
-        self.models_dir_var = tk.StringVar(value=models_dir if models_dir else "")
-        output_dir = str(settings.get("output_dir", "")).strip()
-        self.output_dir_var = tk.StringVar(value=output_dir if output_dir else "")
+        default_data_dir = get_writable_base_dir()
+        models_dir = str(settings.get("models_dir", "")).strip() or default_data_dir
+        self.models_dir_var = tk.StringVar(value=os.path.abspath(models_dir))
+        output_dir = str(settings.get("output_dir", "")).strip() or default_data_dir
+        self.output_dir_var = tk.StringVar(value=os.path.abspath(output_dir))
 
         # Единый реестр «настройка -> переменная»: единственная точка,
         # по которой собираются и сохраняются все настройки.
@@ -341,6 +345,8 @@ class AppWindow:
             models_path = _resolve_models_path(models_dir)
             os.makedirs(models_path, exist_ok=True)
             apply_models_root(models_path)
+
+        os.makedirs(os.path.abspath(output_dir), exist_ok=True)
 
         self.root.configure(bg=BG_COLOR)
         self.root.title("Рекордер экрана")
@@ -676,7 +682,7 @@ class AppWindow:
         self.root.bind_all("<Button-4>", self._on_settings_mousewheel, add="+")
         self.root.bind_all("<Button-5>", self._on_settings_mousewheel, add="+")
 
-        # Model status section
+        # Секция статуса моделей
         model_frame = tk.LabelFrame(settings_inner, text="Модели", bg=BG_COLOR, fg=TEXT_COLOR, font=("Arial", 11, "bold"))
         model_frame.pack(fill=tk.X, pady=5)
 
@@ -774,7 +780,7 @@ class AppWindow:
             "nemo",
         )
 
-        # Separator
+        # Разделитель
         tk.Frame(settings_inner, height=2, bg=BTN_COLOR).pack(fill=tk.X, pady=10)
 
         trans_label = tk.Label(settings_inner, text="Транскрипция:", bg=BG_COLOR, fg=TEXT_COLOR, font=("Arial", 12))
@@ -808,7 +814,7 @@ class AppWindow:
             "• CPU — только процессор (медленнее, но работает везде).",
         )
 
-        # Separator
+        # Разделитель
         tk.Frame(settings_inner, height=2, bg=BTN_COLOR).pack(fill=tk.X, pady=10)
 
         self.enable_transcription = tk.BooleanVar(value=settings.get("enable_transcription", True))
@@ -932,13 +938,13 @@ class AppWindow:
             relief="flat",
         ).grid(row=2, column=1, sticky="w", padx=(6, 0), pady=2)
 
-        # Paths section
+        # Секция директорий
         tk.Frame(settings_inner, height=2, bg=BTN_COLOR).pack(fill=tk.X, pady=10)
 
         paths_frame = tk.LabelFrame(settings_inner, text="Директории", bg=BG_COLOR, fg=TEXT_COLOR, font=("Arial", 11, "bold"))
         paths_frame.pack(fill=tk.X, pady=5)
 
-        # Models directory
+        # Директория моделей
         models_dir_label = tk.Label(paths_frame, text="Папка моделей:", bg=BG_COLOR, fg=TEXT_COLOR, font=("Arial", 10))
         models_dir_label.pack(anchor="w", padx=5, pady=(8, 2))
         models_path_frame = tk.Frame(paths_frame, bg=BG_COLOR)
@@ -962,7 +968,7 @@ class AppWindow:
             command=lambda: self._browse_dir(self.models_dir_var)
         ).pack(side=tk.RIGHT)
 
-        # Output directory
+        # Директория результатов
         output_dir_label = tk.Label(paths_frame, text="Папка для результатов:", bg=BG_COLOR, fg=TEXT_COLOR, font=("Arial", 10))
         output_dir_label.pack(anchor="w", padx=5, pady=(8, 2))
         output_path_frame = tk.Frame(paths_frame, bg=BG_COLOR)
@@ -1002,6 +1008,7 @@ class AppWindow:
         self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
 
     def _style_combobox_popdowns(self):
+        """Дополнительно стилизует выпадающие списки (Listbox) внутри Combobox в тёмной теме."""
         style = ttk.Style()
         style.configure("Dark.TCombobox", fieldbackground=BTN_COLOR)
         try:
@@ -1013,9 +1020,20 @@ class AppWindow:
             pass
 
     def load_icon(self, path, size=(24, 24)):
+        """Загружает изображение из ресурсов приложения и приводит его к размеру size."""
         full_path = os.path.join(RESOURCE_BASE_DIR, path.lstrip("./"))
         img = Image.open(full_path).resize(size, Image.Resampling.LANCZOS)
         return ImageTk.PhotoImage(img)
+
+    def _effective_models_dir(self):
+        """Каталог моделей: пользовательский или каталог программы."""
+        value = self.models_dir_var.get().strip()
+        return value or get_writable_base_dir()
+
+    def _effective_output_dir(self):
+        """Каталог результатов: пользовательский или каталог программы."""
+        value = self.output_dir_var.get().strip()
+        return value or get_writable_base_dir()
 
     def collect_settings(self) -> dict:
         """Единая точка сбора настроек: реестр «ключ -> переменная»."""
@@ -1028,10 +1046,11 @@ class AppWindow:
         return collected
 
     def _on_setting_change(self, *args):
+        """Обрабатывает изменение любой настройки: сохраняет её на диске и применяет новый каталог моделей."""
         settings = self.collect_settings()
         save_settings(settings)
 
-        models_dir = settings["models_dir"]
+        models_dir = self._effective_models_dir()
         if models_dir:
             from model_manager import resolve_models_path as _resolve_models_path
             from background_tasks import apply_models_root
@@ -1042,20 +1061,24 @@ class AppWindow:
                 self.log(f"Модели: найдены в {models_path}")
 
     def _browse_dir(self, var):
+        """Открывает диалог выбора директории и записывает выбранный путь в переменную var."""
         path = filedialog.askdirectory(title="Выберите директорию")
         if path:
             var.set(path)
 
     def _on_diarization_toggle(self, *args):
+        """Реакция на переключение диаризации — обновляет видимость полей ограничения спикеров."""
         self._toggle_speaker_limits_visibility()
 
     def _toggle_speaker_limits_visibility(self):
+        """Показывает или скрывает блок с полями количества спикеров в зависимости от включённой диаризации."""
         if self.enable_diarization.get():
             self.speaker_limits_frame.pack(anchor="w", padx=8, pady=(0, 8))
         else:
             self.speaker_limits_frame.pack_forget()
 
     def _on_settings_mousewheel(self, event):
+        """Прокручивает панель настроек колесом мыши, если открыта вкладка «Настройки»."""
         current_tab = self.notebook.select()
         if current_tab != str(self.tab_settings):
             return
@@ -1073,8 +1096,9 @@ class AppWindow:
             return "break"
 
     def _set_buttons_recording(self, recording: bool, mode: str | None = None):
+        """Обновляет состояние кнопок записи: сбрасывает их, а во время записи отключает неактивные и выделяет активную кнопку «Остановить»."""
 
-        # Reset all buttons first
+        # Сначала сбрасываем все кнопки
         self.button_full.config(bg=BTN_COLOR, fg=TEXT_COLOR, text="Весь экран", image=self.fullscreen_img, state="normal", command=self.on_full_screen, cursor="hand2")
         self.button_area.config(bg=BTN_COLOR, fg=TEXT_COLOR, text="Область экрана", image=self.area_img, state="normal", command=self.on_area_screen, cursor="hand2")
         self.button_program.config(bg=BTN_COLOR, fg=TEXT_COLOR, text="Программа", image=self.program_img, state="normal", command=self.on_program_screen, cursor="hand2")
@@ -1084,7 +1108,7 @@ class AppWindow:
             self.recording_status_text.set("▶ ИДЁТ ЗАПИСЬ!")
             self.model_status_canvas.itemconfig(self.oval, fill="#EE5454")
 
-            # Disable other record buttons
+            # Отключаем остальные кнопки записи
             if mode != "fullscreen":
                 self.button_full.config(state="disabled", cursor="X_cursor")
             if mode != "area":
@@ -1094,7 +1118,7 @@ class AppWindow:
             if mode != "audio":
                 self.button_audio.config(state="disabled", cursor="X_cursor")
 
-            # Keep the active button enabled with "Остановить" text
+            # Активная кнопка остаётся включённой с текстом «Остановить»
             if mode == "fullscreen":
                 self.button_full.config(text="Остановить", cursor="hand2")
             elif mode == "area":
@@ -1109,6 +1133,7 @@ class AppWindow:
         self.root.update_idletasks()
 
     def log(self, message):
+        """Добавляет сообщение в журнал и выводит его в текстовую область интерфейса."""
         self.global_log_lines.append(message)
 
         def _update_ui():
@@ -1123,6 +1148,7 @@ class AppWindow:
             pass
 
     def set_model_status(self, state):
+        """Обновляет индикатор состояния моделей, определяя, каких моделей не хватает для выбранных настроек."""
         text = "Модели не скачены"
         if isinstance(state, dict):
             required = []
@@ -1163,6 +1189,7 @@ class AppWindow:
             self.model_status_canvas.itemconfig(self.oval, fill=color)
 
     def update_status(self):
+        """Обновляет строку статуса записи: показывает текущий режим, временный статус или состояние моделей."""
         if self.current_mode["mode"]:
             name = MODE_NAMES.get(self.current_mode["mode"], "")
             self.recording_status_text.set(f"Идёт запись: {name}")
@@ -1174,18 +1201,22 @@ class AppWindow:
             self.set_model_status(state)
 
     def _set_runtime_status(self, message: str):
+        """Устанавливает временный статус в строке состояния (например, о фоновой обработке)."""
         self.runtime_status_override = message
         self._render_runtime_status()
 
     def _clear_runtime_status(self):
+        """Сбрасывает временный статус и заново обновляет строку состояния."""
         self.runtime_status_override = None
         self.update_status()
 
     def _clear_runtime_status_if_idle(self):
+        """Снимает временный статус, только когда нет активной постобработки и записи."""
         if not self.postprocess_jobs and not self.current_mode["mode"]:
             self._clear_runtime_status()
 
     def _render_runtime_status(self):
+        """Отрисовывает временный статус со спиннером в строке состояния, если запись не идёт."""
         if self.current_mode["mode"]:
             return
 
@@ -1203,12 +1234,14 @@ class AppWindow:
         self.model_status_canvas.itemconfig(self.oval, fill=color)
 
     def _animate_runtime_indicator(self):
+        """Циклически меняет анимацию индикатора и перерисовывает временный статус."""
         self._spinner_index = (self._spinner_index + 1) % len(self._spinner_frames)
         if (self.runtime_status_override or self.model_download_jobs) and not self.current_mode["mode"]:
             self._render_runtime_status()
         self.root.after(180, self._animate_runtime_indicator)
 
     def _start_model_download_process(self, model_name, token, models_dir=""):
+        """Запускает фоновый процесс скачивания модели и регистрирует задачу для отслеживания прогресса."""
         if model_name in self.model_download_jobs:
             self.log(f"Скачивание {model_name} уже выполняется")
             return
@@ -1227,6 +1260,7 @@ class AppWindow:
         process.start()
 
     def _start_postprocess_process(self, payload):
+        """Запускает фоновый процесс постобработки записи и показывает статус «Идёт обработка»."""
         job_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
         event_queue = self.mp_context.Queue()
         process = self.mp_context.Process(
@@ -1243,6 +1277,7 @@ class AppWindow:
         process.start()
 
     def _poll_background_jobs(self):
+        """Периодически опрашивает фоновые процессы (скачивание моделей и постобработка) и обновляет интерфейс по событиям из очереди."""
         finished_models = []
         for model_name, job in list(self.model_download_jobs.items()):
             q = job["queue"]
@@ -1367,7 +1402,7 @@ class AppWindow:
             selected_video_quality = VIDEO_QUALITY_LABEL_TO_CRF.get(self.video_quality.get(), 23)
             selected_audio_mode = AUDIO_TRACK_LABEL_TO_MODE.get(self.audio_track_mode.get(), "copy")
 
-            output_dir = self.output_dir_var.get().strip()
+            output_dir = self._effective_output_dir()
             if output_dir:
                 os.makedirs(output_dir, exist_ok=True)
 
@@ -1400,7 +1435,7 @@ class AppWindow:
                 else:
                     os.replace(video_src, video_tmp)
 
-            models_dir = self.models_dir_var.get().strip()
+            models_dir = self._effective_models_dir()
 
             video_filter = None
             auto_crop = False
@@ -1452,6 +1487,7 @@ class AppWindow:
             self.log("Аудиофайл не найден: постобработка не запущена")
 
     def quit_app(self):
+        """Завершает приложение: блокирует закрытие во время постобработки, иначе останавливает запись и закрывает окно."""
         if self.postprocess_jobs:
             self._set_runtime_status("Идёт распознавание, дождитесь завершения")
             self.log("Нельзя закрыть окно: выполняется фоновая обработка записи")
@@ -1463,7 +1499,7 @@ class AppWindow:
     def run_transcribe_and_diarization(self):
         """Обработка аудиофайла после записи (диаризация и распознавание)."""
         if not os.path.exists(AUDIO_OUTPUT):
-            # Try to find any recent audio file
+            # Пробуем найти недавний аудиофайл
             import glob
             wav_files = glob.glob("*.wav")
             if not wav_files:
@@ -1494,7 +1530,7 @@ class AppWindow:
                 return None
             return ivalue if ivalue > 0 else None
 
-        output_dir = self.output_dir_var.get().strip()
+        output_dir = self._effective_output_dir()
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
 
@@ -1594,7 +1630,7 @@ class AppWindow:
         audio_file = "audio_realtime.wav"
         output_file = "output.md"
 
-        # Wait a bit for audio to accumulate
+        # Ждём немного, чтобы накопилось аудио
         time.sleep(5)
 
         hf_token = load_hf_token()
@@ -1613,7 +1649,7 @@ class AppWindow:
                 include_timecodes=bool(self.include_timecodes.get()),
             )
 
-            # Wait for recording to finish and transcribe available audio
+            # Ждём окончания записи и транскрибируем накопленное аудио
             while self.current_mode["mode"] is not None:
                 if os.path.exists(AUDIO_OUTPUT) and os.path.getsize(AUDIO_OUTPUT) > 1000:
                     try:
@@ -1629,7 +1665,7 @@ class AppWindow:
                         self.log(f"Частичная ошибка: {e}")
                 time.sleep(10)
 
-            # Final transcription when recording stops
+            # Финальная транскрибация после остановки записи
             if os.path.exists(AUDIO_OUTPUT) and os.path.getsize(AUDIO_OUTPUT) > 1000:
                 self.log("Финальная транскрибация...")
                 result = transcriber.full_transcribe(
@@ -1643,6 +1679,7 @@ class AppWindow:
             self.log(f"Ошибка транскрибации: {e}")
 
     def _start_mode(self, mode_class, mode_key, **kwargs):
+        """Запускает выбранный режим записи: создаёт объект режима, начинает захват звука и запись, обновляет кнопки и статус."""
         self.stop_current()
         mode = mode_class(**kwargs)
         if hasattr(mode, "selected_area") and not mode.selected_area:
@@ -1660,6 +1697,7 @@ class AppWindow:
         self.update_status()
 
     def _start_audio_capture_or_warn(self):
+        """Запускает запись звука; при отсутствии ffmpeg или ошибках выводит предупреждения в журнал."""
         if not _check_disk_space():
             self.log("Предупреждение: мало места на диске. Запись может прерваться.")
         if not has_ffmpeg():
@@ -1680,10 +1718,13 @@ class AppWindow:
 
         if sys.platform == "win32":
             self.log("Не удалось запустить запись звука (Windows). Проверьте аудио-устройства и ffmpeg.")
+        elif sys.platform == "darwin":
+            self.log("Не удалось запустить запись звука (macOS). Разрешите доступ к микрофону в Системных настройках → Приватность и безопасность → Микрофон. Для записи системного звука установите виртуальное аудио-устройство (например BlackHole).")
         else:
             self.log("Не удалось запустить запись звука. Проверьте аудио-устройства и ffmpeg.")
 
     def on_full_screen(self):
+        """Обработчик кнопки «Весь экран»: останавливает запись или запускает режим записи всего экрана (в т.ч. через Wayland)."""
         if self.current_mode["mode"] == "fullscreen":
             self.stop_current()
             return
@@ -1724,6 +1765,7 @@ class AppWindow:
             self._start_mode(FullScreenMode, "fullscreen")
 
     def on_area_screen(self):
+        """Обработчик кнопки «Область экрана»: останавливает запись или запускает запись выделенной области (в т.ч. через Wayland)."""
         if self.current_mode["mode"] == "area":
             self.stop_current()
             return
@@ -1771,6 +1813,7 @@ class AppWindow:
         self._start_mode(AreaScreenMode, "area", master=self.root)
 
     def on_program_screen(self):
+        """Обработчик кнопки «Программа»: останавливает запись или запускает запись выбранного окна/программы."""
         if self.current_mode["mode"] == "program":
             self.stop_current()
             return
@@ -1810,6 +1853,7 @@ class AppWindow:
         self._set_buttons_recording(True, "program")
 
     def _handle_wayland_missing(self, context: str):
+        """Фиксирует отсутствие Wayland-поддержки: пишет отчёт об ошибке и сообщает пользователю в статус и журнал."""
         details = wayland_dependency_issue() or "неизвестно"
         if details == "модуль Wayland недоступен" and _WAYLAND_BACKEND_IMPORT_ERROR:
             details = f"не удалось импортировать backend Wayland: {_WAYLAND_BACKEND_IMPORT_ERROR}"
@@ -1820,6 +1864,7 @@ class AppWindow:
         self.log(info)
 
     def on_audio_only(self):
+        """Обработчик кнопки «Только аудио»: запускает или останавливает запись только звука."""
         if self.current_mode["mode"] == "audio":
             self.stop_current()
         else:
@@ -1870,6 +1915,7 @@ class AppWindow:
         self.set_model_status(status)
 
     def _update_model_checkboxes(self):
+        """Обновляет состояние строк моделей по фактическому состоянию файлов на диске."""
         self._refresh_model_rows()
 
     def _delete_model(self, model_name):
@@ -1919,10 +1965,12 @@ class AppWindow:
         self._start_model_download_process(model_name, hf_token, self.models_dir_var.get().strip())
 
     def run(self):
+        """Запускает проверку ffmpeg при старте и входит в главный цикл обработки событий Tkinter."""
         self.root.after(500, self._startup_ffmpeg_check)
         self.root.mainloop()
 
     def _startup_ffmpeg_check(self):
+        """При старте проверяет наличие ffmpeg и при отсутствии пытается автоматически его скачать в фоне."""
         if has_ffmpeg():
             return
         self.log("ffmpeg не найден. Пробую скачать автоматически...")

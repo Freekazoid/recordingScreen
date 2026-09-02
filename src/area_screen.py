@@ -18,6 +18,7 @@ from video_writer_utils import create_video_writer
 
 
 def _is_wayland() -> bool:
+    """Определяет, выполняется ли приложение под Wayland."""
     if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland":
         return True
     return bool(os.environ.get("WAYLAND_DISPLAY"))
@@ -297,6 +298,7 @@ def _grab_background_image() -> Image.Image | None:
 
 
 def _decode_png(data: bytes, source: str) -> Image.Image | None:
+    """Декодирует PNG-байты в RGB-изображение; при ошибке пишет диагностику и возвращает None."""
     try:
         img = Image.open(BytesIO(data))
         img.load()
@@ -307,6 +309,7 @@ def _decode_png(data: bytes, source: str) -> Image.Image | None:
 
 
 def select_wayland_area() -> tuple[int, int, int, int] | None:
+    """Выделяет область через slurp и возвращает (x0, y0, x1, y1); None при отмене или недоступности."""
     if os.environ.get("XDG_SESSION_TYPE", "").lower() != "wayland" and not os.environ.get("WAYLAND_DISPLAY"):
         return None
     if shutil.which("slurp") is None:
@@ -334,6 +337,7 @@ def select_wayland_area() -> tuple[int, int, int, int] | None:
 
 
 def select_screen_area(master=None) -> tuple[int, int, int, int] | None:
+    """Показывает полноэкранное окно с кадром экрана и возвращает выбранную область (x0, y0, x1, y1)."""
     # Порядок: сначала скриншот из программы (главное окно ещё в фокусе —
     # портал показывает диалог), а после получения кадра — окно выбора со
     # сделанным скриншотом. Если пользователь отменил доступ к экрану —
@@ -384,6 +388,7 @@ def select_screen_area(master=None) -> tuple[int, int, int, int] | None:
     )
 
     def _draw_background(img: Image.Image | None) -> bool:
+        """Рисует переданный кадр как фон canvas, при необходимости масштабируя; True при успехе."""
         if img is None:
             return False
         try:
@@ -432,6 +437,7 @@ def select_screen_area(master=None) -> tuple[int, int, int, int] | None:
     }
 
     def on_press(event):
+        """Запоминает начальную точку и создаёт прямоугольник выделения."""
         state["start_x"] = canvas.canvasx(event.x)
         state["start_y"] = canvas.canvasy(event.y)
         if state["rect"]:
@@ -446,12 +452,14 @@ def select_screen_area(master=None) -> tuple[int, int, int, int] | None:
         )
 
     def on_drag(event):
+        """Обновляет размеры рамки выделения при движении мыши."""
         if state["rect"] is not None and state["start_x"] is not None and state["start_y"] is not None:
             cur_x = canvas.canvasx(event.x)
             cur_y = canvas.canvasy(event.y)
             canvas.coords(state["rect"], state["start_x"], state["start_y"], cur_x, cur_y)
 
     def on_release(event):
+        """Фиксирует выбранную область и закрывает окно, если она достаточно велика."""
         if state["start_x"] is None or state["start_y"] is None:
             return
         end_x = canvas.canvasx(event.x)
@@ -470,7 +478,10 @@ def select_screen_area(master=None) -> tuple[int, int, int, int] | None:
 
 
 class AreaScreenMode:
+    """Режим записи выделенной области: выбор области и запись в потоке."""
+
     def __init__(self, master=None):
+        """Инициализирует режим и запрашивает у пользователя выбор области записи."""
         self.master = master
         self.selected_area: tuple[int, int, int, int] | None = select_screen_area(master)
         self.recording = False
@@ -479,6 +490,7 @@ class AreaScreenMode:
         self.video_filepath: str | None = None
 
     def start_recording(self):
+        """Запускает запись выбранной области в отдельном потоке, если область задана."""
         if self.selected_area:
             print(f"[AreaScreenMode] Начата запись области: {self.selected_area}")
             self.recording = True
@@ -490,6 +502,7 @@ class AreaScreenMode:
             print("[AreaScreenMode] Область не выбрана, запись не начата")
 
     def _capture_loop(self):
+        """Цикл захвата кадров области с заданным FPS до остановки; пишет видеофайл."""
         if self.selected_area is None or self.video_filepath is None:
             print("[AreaScreenMode] selected_area или video_filepath не определены!")
             return
@@ -512,7 +525,7 @@ class AreaScreenMode:
             if now < next_frame_time:
                 time.sleep(next_frame_time - now)
 
-            # ImageGrab is unreliable on Wayland; retry-safe capture
+            # ImageGrab ненадёжен на Wayland; безопасный захват с повторами
             try:
                 img = ImageGrab.grab(bbox=self.selected_area)
                 frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
@@ -520,7 +533,7 @@ class AreaScreenMode:
                 continue
             if frame.shape[1] != target_w or frame.shape[0] != target_h:
                 frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
-            # Ensure writer is valid before writing
+            # Проверяем, что writer корректен, прежде чем писать
             if out is not None and out.isOpened():
                 out.write(frame)
 
@@ -532,6 +545,7 @@ class AreaScreenMode:
         print(f"[AreaScreenMode] Видео сохранено в {self.video_filepath}")
 
     def stop_recording(self):
+        """Останавливает запись области, завершая поток захвата."""
         if self.recording:
             print("[AreaScreenMode] Остановлена запись области")
             self._stop_event.set()

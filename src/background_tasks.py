@@ -14,17 +14,20 @@ class DebugLogRedirect:
     """
 
     def __init__(self, path):
+        """Сохраняет путь к файлу отладки и текущие stdout/stderr для их восстановления при закрытии."""
         self.path = path
         self._file = None
         self._saved = (sys.stdout, sys.stderr)
 
     def open(self):
+        """Открывает файл лога на дозапись и временно перенаправляет в него stdout/stderr."""
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
         self._file = open(self.path, "a", encoding="utf-8", buffering=1)
         sys.stdout = self._file
         sys.stderr = self._file
 
     def write_line(self, text):
+        """Пишет строки текста в файл лога с меткой времени; ничего не делает, если файл закрыт."""
         if self._file is None or self._file.closed:
             return
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -32,6 +35,7 @@ class DebugLogRedirect:
             self._file.write(f"[{ts}] {line}\n")
 
     def close(self):
+        """Возвращает исходные stdout/stderr и закрывает файл лога (если он открыт)."""
         sys.stdout, sys.stderr = self._saved
         if self._file is not None and not self._file.closed:
             try:
@@ -74,6 +78,7 @@ def _apply_models_dir(models_dir):
 
 
 def download_model_worker(model_name, token, event_queue, models_dir=""):
+    """Фоновая задача: скачивает модель в дочернем процессе и сообщает о прогрессе через очередь событий."""
     from proc_env import install_subprocess_guard
     install_subprocess_guard()
 
@@ -85,9 +90,11 @@ def download_model_worker(model_name, token, event_queue, models_dir=""):
         pass
 
     def log_func(message):
+        """Передаёт строку лога в очередь событий."""
         event_queue.put(("log", str(message)))
 
     def progress_func(percent):
+        """Передаёт процент прогресса скачивания в очередь событий."""
         event_queue.put(("progress", float(percent)))
 
     try:
@@ -99,6 +106,7 @@ def download_model_worker(model_name, token, event_queue, models_dir=""):
 
 
 def postprocess_recording_worker(payload, event_queue):
+    """Фоновая задача: по параметрам payload объединяет видео/аудио, распознаёт текст и спикеров, отчитываясь в очередь событий."""
     from proc_env import install_subprocess_guard
     install_subprocess_guard()
 
@@ -107,16 +115,19 @@ def postprocess_recording_worker(payload, event_queue):
     from model_manager import is_model_downloaded, load_hf_token
 
     def log(message):
+        """Пишет обычное сообщение в очередь событий и (при отладке) в файл-лог."""
         event_queue.put(("log", str(message)))
         if debug_redirect:
             debug_redirect.write_line(message)
 
     def status(message):
+        """Пишет сообщение статуса в очередь событий и (при отладке) в файл-лог с пометкой [СТАТУС]."""
         event_queue.put(("status", str(message)))
         if debug_redirect:
             debug_redirect.write_line(f"[СТАТУС] {message}")
 
     def parse_optional_int(value):
+        """Приводит значение к положительному целому либо возвращает None, если оно пустое или невалидное."""
         if value is None:
             return None
         if isinstance(value, str):

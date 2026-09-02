@@ -32,11 +32,11 @@ from wayland_portal_async import (
 
 
 def _import_wayland_portal():
-    """Import GI portal helpers without permanently polluting sys.path.
+    """Импортирует GI-помощники портала, не засоряя sys.path надолго.
 
-    Permanently adding /usr/lib/python*/dist-packages into a frozen AppImage
-    makes Python pick the system psutil (often built for another Python ABI)
-    and breaks Whisper with `_psutil_linux` / circular import errors.
+    Постоянное добавление /usr/lib/python*/dist-packages в frozen AppImage
+    заставляет Python подхватить системный psutil (часто собранный под другую
+    ABI Python) и ломает Whisper ошибками `_psutil_linux` / кругового импорта.
     """
     added: list[str] = []
     if getattr(sys, "frozen", False):
@@ -100,25 +100,29 @@ class WaylandPortalRecorderError(RuntimeError):
 
 
 def is_wayland_session() -> bool:
+    """True, если текущая сессия работает под Wayland."""
     session_type = os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
     wayland_socket = bool(os.environ.get("WAYLAND_DISPLAY"))
     return session_type or wayland_socket
 
 
 def _recording_backend_available() -> bool:
-    """True when we can capture PipeWire after the portal returns a stream."""
+    """True, когда можно захватить PipeWire после того, как портал вернёт поток."""
     return pipewire_recording_backend_available()
 
 
 def _portal_dbus_next_backend_available() -> bool:
+    """Доступен ли бэкенд записи на базе dbus-next."""
     return dbus_available() and dbus_supports_unix_fd() and _recording_backend_available()
 
 
 def _portal_gi_backend_available() -> bool:
+    """Доступен ли бэкенд записи на базе PyGObject (GI)."""
     return bool(WaylandPortalSession) and portal_dependencies_available() and _recording_backend_available()
 
 
 def _wf_backend_available() -> bool:
+    """Доступен ли бэкенд wf-recorder (по наличию бинарника)."""
     return shutil.which("wf-recorder") is not None
 
 
@@ -412,8 +416,8 @@ class WaylandProgramScreenMode:
 
         errors: list[str] = []
 
-        # Frozen AppImage has no matching system PyGObject — prefer dbus-next.
-        # Unpackaged runs on GNOME prefer GI (historically more reliable there).
+        # У frozen AppImage нет подходящего системного PyGObject — предпочитаем dbus-next.
+        # Неупакованные запуски на GNOME предпочитают GI (там он исторически надёжнее).
         prefer_dbus_first = bool(getattr(sys, "frozen", False))
         portal_order = (
             ("dbus-next", _portal_dbus_next_backend_available, self._run_portal_dbus_next_backend),
@@ -453,10 +457,10 @@ class WaylandProgramScreenMode:
         self._dispatch(lambda: self.on_start_callback(False))
 
     async def _run_portal_dbus_next_backend(self) -> tuple[bool, str | None]:
-        """Run dbus-next portal backend.
+        """Запускает бэкенд записи через портал dbus-next.
 
-        Returns (started, error). started=True means on_start(True) was called
-        (or recording finished) and no further backends should be tried.
+        Возвращает (started, error). started=True означает, что был вызван
+        on_start(True) (или запись завершилась) и другие бэкенды пробовать не нужно.
         """
         portal = ScreenCastPortal()
         session = None
