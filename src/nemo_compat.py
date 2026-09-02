@@ -5,15 +5,27 @@ NeMo 2.x импортирует телеметрию обучения (nv_one_lo
 только инференс, поэтому подменяем модуль заглушкой.
 """
 
-import os
-
-# @torch.jit.script в NeMo требует доступа к исходникам модулей, которых
-# нет в заморозке (PyInstaller). PYTORCH_JIT=0 отключает скриптинг:
-# декорированные функции работают в обычном режиме eager.
-os.environ.setdefault("PYTORCH_JIT", "0")
-
 import sys
 import types
+
+
+def _disable_jit_scripting():
+    """Отключает TorchScript-скриптинг перед импортом NeMo.
+
+    ``@torch.jit.script`` в NeMo требует доступа к исходникам модулей, которых
+    нет в заморозке (PyInstaller), иначе падает ``OSError: Can't get source``.
+    Простая установка ``PYTORCH_JIT=0`` не помогает: его значение читается при
+    первом ``import torch`` (см. torch/jit/_state.py), то есть раньше, чем мы
+    успеваем выставить флаг. Поэтому отключаем скриптинг через
+    ``torch.jit._state.disable()`` — декораторы возвращают исходную функцию,
+    и она работает в обычном режиме eager (без доступа к исходникам).
+    """
+    try:
+        import torch.jit._state as _jit_state
+
+        _jit_state.disable()
+    except Exception:
+        pass
 
 _STUB_MODULE = "nv_one_logger.training_telemetry.integration.pytorch_lightning"
 
@@ -59,6 +71,7 @@ def _make_stub():
 
 def ensure_nemo_imports():
     """Гарантирует импортируемость nemo.collections.asr."""
+    _disable_jit_scripting()
     try:
         import nv_one_logger.training_telemetry.integration.pytorch_lightning  # noqa: F401
     except ModuleNotFoundError:

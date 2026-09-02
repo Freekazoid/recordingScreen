@@ -15,8 +15,9 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # НЕ отключаем TorchScript глобально: PYTORCH_JIT=0 ломает torch.jit.load,
 # который использует silero-vad (PyAnnote) через utils_vad.init_jit_model —
 # PyAnnote падает с "RecursiveScriptModule has no attribute _construct".
-# NeMo на Python 3.14 / torch 2.11 импортируется и работает в eager-режиме
-# без этого флага (см. nemo_compat для точечного отключения при NeMo).
+# NeMo в замороженной сборке не может скомпилировать @torch.jit.script без
+# исходников, поэтому он отключает скриптинг точечно на время импорта
+# (см. nemo_compat._disable_jit_scripting) и работает в eager-режиме.
 
 
 def _get_base_dir():
