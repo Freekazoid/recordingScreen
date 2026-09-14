@@ -201,12 +201,47 @@ def test_area_screen():
         ar._last_grab_cancelled = old_flag
 
 
+# ── nemo_compat (отключение TorchScript для frozen-сборки) ──────────────
+def test_nemo_compat():
+    """Проверяет, что NeMo-совместимость отключает скриптинг TorchScript.
+
+    В замороженной сборке нет .py-исходников, поэтому ``@torch.jit.script``
+    падает с «Can't get source». После ``_disable_jit_scripting()`` декоратор
+    обязан возвращать исходную функцию, не пытаясь её компилировать.
+    """
+    import nemo_compat
+
+    try:
+        import torch
+        import torch.jit._state as jit_state
+    except Exception:
+        check("NC torch доступен (пропуск при отсутствии)", True)
+        return
+
+    saved = bool(getattr(jit_state, "_enabled", True))
+    try:
+        nemo_compat._disable_jit_scripting()
+        check("NC _disable_jit_scripting выключает TorchScript",
+              bool(getattr(jit_state, "_enabled", True)) is False)
+
+        def _sample(x):
+            return x + 1
+
+        scripted = torch.jit.script(_sample)
+        check("NC после disable torch.jit.script — no-op",
+              scripted is _sample)
+    finally:
+        if saved:
+            jit_state.enable()
+
+
 # ── main ────────────────────────────────────────────────────────────────
 def main() -> int:
     test_settings_manager()
     test_portal_identity()
     test_screencast_frame()
     test_area_screen()
+    test_nemo_compat()
 
     print("")
     print("RESULT:", "PASS" if not failures else "FAIL:" + ",".join(failures))

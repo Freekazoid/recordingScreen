@@ -25,7 +25,7 @@ from logging_utils import write_error_report
 from model_manager import get_model_status, load_hf_token
 from program_screen import ProgramScreenMode
 from program_screen_win import WindowsProgramScreenMode
-from settings_manager import load_settings, save_settings
+from settings_manager import load_settings, save_settings, update_settings
 
 _WAYLAND_BACKEND_IMPORT_ERROR = None
 try:
@@ -835,8 +835,8 @@ class AppWindow:
             "max_speakers": self.max_speakers,
         })
 
-        for var in self._setting_vars.values():
-            var.trace_add("write", self._on_setting_change)
+        for key, var in self._setting_vars.items():
+            var.trace_add("write", lambda *_args, _key=key: self._on_setting_change(_key))
         self.enable_diarization.trace_add("write", self._on_diarization_toggle)
 
         cb_trans = tk.Checkbutton(
@@ -1045,11 +1045,27 @@ class AppWindow:
             collected[key] = value
         return collected
 
-    def _on_setting_change(self, *args):
-        """Обрабатывает изменение любой настройки: сохраняет её на диске и применяет новый каталог моделей."""
-        settings = self.collect_settings()
-        save_settings(settings)
+    def _on_setting_change(self, key: str | None = None, *args):
+        """Сохраняет изменённую настройку и применяет новый каталог моделей.
 
+        Записываем ТОЛЬКО изменившийся ключ, предварительно сливая его с
+        настройками на диске. Если открыто несколько копий приложения, каждая
+        из них хранит свой снимок настроек; полная перезапись файла устаревшим
+        снимком затирала бы значения, изменённые в другой копии. Точечная
+        запись этого не допускает.
+        """
+        if key is None:
+            save_settings(self.collect_settings())
+        else:
+            var = self._setting_vars.get(key)
+            if var is not None:
+                value = var.get()
+                if isinstance(value, str):
+                    value = value.strip()
+                update_settings({key: value})
+
+        if key not in (None, "models_dir"):
+            return
         models_dir = self._effective_models_dir()
         if models_dir:
             from model_manager import resolve_models_path as _resolve_models_path
@@ -1719,7 +1735,12 @@ class AppWindow:
         if sys.platform == "win32":
             self.log("Не удалось запустить запись звука (Windows). Проверьте аудио-устройства и ffmpeg.")
         elif sys.platform == "darwin":
-            self.log("Не удалось запустить запись звука (macOS). Разрешите доступ к микрофону в Системных настройках → Приватность и безопасность → Микрофон. Для записи системного звука установите виртуальное аудио-устройство (например BlackHole).")
+            detail = getattr(self.audio_recorder, "_last_audio_error", "") or ""
+            self.log(
+                "Не удалось запустить запись звука (macOS). Разрешите доступ к микрофону в Системных настройках → Приватность и безопасность → Микрофон. "
+                "Для записи системного звука установите виртуальное аудио-устройство (например BlackHole)."
+                + (f" Ошибка ffmpeg: {detail}" if detail else "")
+            )
         else:
             self.log("Не удалось запустить запись звука. Проверьте аудио-устройства и ffmpeg.")
 

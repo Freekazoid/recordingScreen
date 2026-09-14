@@ -19,11 +19,20 @@ def _disable_jit_scripting():
     успеваем выставить флаг. Поэтому отключаем скриптинг через
     ``torch.jit._state.disable()`` — декораторы возвращают исходную функцию,
     и она работает в обычном режиме eager (без доступа к исходникам).
+
+    ``torch.jit.load`` (загрузка уже скомпилированных модулей, например
+    silero-vad в PyAnnote) при этом продолжает работать: отключается только
+    компиляция из исходников.
     """
     try:
         import torch.jit._state as _jit_state
 
-        _jit_state.disable()
+        disable = getattr(_jit_state, "disable", None)
+        if callable(disable):
+            disable()
+        else:
+            # Запасной вариант для версий torch без функции disable().
+            _jit_state._enabled = False
     except Exception:
         pass
 

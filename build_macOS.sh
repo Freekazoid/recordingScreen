@@ -191,6 +191,14 @@ if [[ -f "$PLIST_PATH" ]]; then
     || /usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription '$MIC_DESC'" "$PLIST_PATH"
 fi
 
+# Правка Info.plist после сборки ломает подпись кода, а без валидной подписи
+# macOS отклоняет доступ к микрофону. Переподписываем бандл заново: своей
+# identity, если она задана, иначе ad-hoc (подходит для локальных dev-сборок).
+if command -v codesign >/dev/null 2>&1; then
+  SIGN_IDENTITY="${MACOS_SIGN_IDENTITY:--}"
+  codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_PATH" 2>/dev/null || true
+fi
+
 rm -f "$ZIP_PATH"
 ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_PATH"
 

@@ -158,6 +158,20 @@ def save_settings(settings: dict):
             pass
 
 
+def update_settings(changes: dict):
+    """Сохраняет только переданные ключи, не затирая остальные значения на диске.
+
+    Сначала читает текущий конфиг, накладывает изменения и пишет результат.
+    Нужно, чтобы копия приложения с устаревшим снимком настроек (например,
+    второе открытое окно) не затирала значения, изменённые в другой копии.
+    """
+    if not isinstance(changes, dict) or not changes:
+        return
+    current = load_settings()
+    current.update(changes)
+    save_settings(current)
+
+
 __all__ = [
     "DEFAULTS",
     "DEFAULT_SETTINGS_FILE",
@@ -166,5 +180,6 @@ __all__ = [
     "default_settings_file",
     "load_settings",
     "save_settings",
+    "update_settings",
     "normalize",
 ]

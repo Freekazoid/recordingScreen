@@ -3,20 +3,30 @@ import os
 import sys
 
 
-def _is_pyinstaller_temp_dir(path: str) -> bool:
-    """True, если *path* — временный каталог распаковки PyInstaller onefile (напр. _MEI00012345).
+# Префиксы имён каталогов, которые runtime создаёт во временном каталоге:
+#   _MEI*                — распаковка PyInstaller onefile;
+#   .mount_*             — точка монтирования squashfs AppImage;
+#   appimage_extracted_* — распаковка AppImage при extract-and-run (нет FUSE).
+_EPHEMERAL_DIR_PREFIXES = ("_MEI", ".mount_", "appimage_extracted_")
 
-    В Windows-режиме onefile PyInstaller sys.executable указывает на
-    распакованную копию внутри %TEMP%/_MEI*. Этот каталог доступен для записи,
-    но недолговечен (удаляется при завершении процесса), поэтому его НЕЛЬЗЯ
-    использовать для постоянных данных (модели, настройки).
+
+def _is_pyinstaller_temp_dir(path: str) -> bool:
+    """True, если *path* — временный (недолговечный) каталог frozen-сборки.
+
+    Такой каталог доступен для записи, но удаляется при завершении процесса
+    (onefile PyInstaller, маунт AppImage, AppImage extract-and-run), поэтому
+    его НЕЛЬЗЯ использовать для постоянных данных (модели, настройки): иначе
+    настройки будут теряться после перезапуска.
+
+    Проверяем КАЖДЫЙ компонент пути, а не только последний: при extract-and-run
+    AppImage распаковывается в ``<temp>/appimage_extracted_*``, и
+    ``sys.executable`` лежит глубже (``.../usr/bin/ScreenRecorder``), поэтому
+    одного basename недостаточно.
     """
-    base = os.path.basename(path)
-    if base.startswith("_MEI") and len(base) > 4:
-        return True
-    # Маунт squashfs AppImage: /tmp/.mount_*
-    if base.startswith(".mount_"):
-        return True
+    for part in os.path.normpath(path).split(os.sep):
+        for prefix in _EPHEMERAL_DIR_PREFIXES:
+            if part.startswith(prefix) and len(part) > len(prefix):
+                return True
     return False
 
 

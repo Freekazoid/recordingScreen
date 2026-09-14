@@ -40,6 +40,7 @@ class AudioRecorder:
         self.ffmpeg_bin = ffmpeg_command()
         self._loopback_stop = threading.Event()
         self._loopback_thread = None
+        self._last_audio_error = None
         self._refresh_sources()
         if not os.path.exists(self.segment_dir):
             os.makedirs(self.segment_dir, exist_ok=True)
@@ -259,60 +260,91 @@ class AudioRecorder:
         """Имена микрофонов macOS (все источники, кроме системных и default)."""
         return [s for s in self.sources if s != "default" and not self._is_macos_system_device(s)]
 
-    def _macos_input_spec(self, device_name):
-        """AVFoundation-спецификация входа `:audio` (только звук, без видео)."""
+    def _macos_input_candidates(self, device_name):
+        """Порядок попыток захвата AVFoundation: индекс, затем имя, затем default."""
+        candidates: list[str] = []
         if not device_name or device_name == "default":
-            return ":default"
-        idx = self._macos_audio_devices.get(device_name)
-        if idx is not None:
-            return f":{idx}"
-        return f":{device_name}"
+            candidates.append(":default")
+        else:
+            idx = self._macos_audio_devices.get(device_name)
+            if idx is not None:
+                candidates.append(f":{idx}")
+            if device_name != "default":
+                candidates.append(f":{device_name}")
+        if ":default" not in candidates:
+            candidates.append(":default")
+        return candidates
+
+    def _spawn_capture_ffmpeg(self, cmd):
+        """Запускает ffmpeg с перехватом stderr для диагностики.
+
+        Возвращает (proc, get_stderr). stderr читается фоновым потоком и
+        хранится в ограниченном буфере, чтобы не зависнуть, если ffmpeg
+        долго работает или выводит много сообщений.
+        """
+        kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.PIPE, "text": True}
+        if _CREATIONFLAGS_NO_WINDOW:
+            kwargs.setdefault("creationflags", _CREATIONFLAGS_NO_WINDOW)
+        proc = subprocess.Popen(cmd, **kwargs)
+        buf: list[str] = []
+
+        def _drain():
+            try:
+                for line in proc.stderr:
+                    buf.append(line)
+                    if len(buf) > 60:
+                        buf.pop(0)
+            except Exception:
+                pass
+
+        threading.Thread(target=_drain, daemon=True).start()
+
+        def _get_stderr() -> str:
+            return "".join(buf)[-6000:].strip()
+
+        return proc, _get_stderr
 
     def _start_macos_capture(self, device_name, out_path, key="main"):
-        """Запуск записи устройства AVFoundation в out_path. key: main/system/mic."""
-        try:
-            proc = self._popen([
-                self.ffmpeg_bin, "-y",
-                "-f", "avfoundation", "-i", self._macos_input_spec(device_name),
-                "-ar", "48000", "-ac", "2", out_path,
-            ])
-        except Exception:
-            return False
-        time.sleep(0.4)
-        if proc.poll() is None:
-            if key == "mic":
-                self.process_mic = proc
-            elif key == "system":
-                self.process_system = proc
-                self.process_main = proc
-            else:
-                self.process_main = proc
-            return True
-        try:
-            proc.terminate()
-        except Exception:
-            pass
+        """Запуск записи устройства AVFoundation в out_path. key: main/system/mic.
+
+        Пробует захват по индексу, затем по имени, затем default; при сбое
+        сохраняет текст ошибки ffmpeg в self._last_audio_error.
+        """
+        for input_spec in self._macos_input_candidates(device_name):
+            try:
+                proc, get_stderr = self._spawn_capture_ffmpeg([
+                    self.ffmpeg_bin, "-y",
+                    "-f", "avfoundation", "-i", input_spec,
+                    "-ar", "48000", "-ac", "2", out_path,
+                ])
+            except Exception as exc:
+                self._last_audio_error = f"не удалось запустить ffmpeg ({input_spec}): {exc}"
+                continue
+            time.sleep(0.5)
+            if proc.poll() is None:
+                self._last_audio_error = None
+                if key == "mic":
+                    self.process_mic = proc
+                elif key == "system":
+                    self.process_system = proc
+                    self.process_main = proc
+                else:
+                    self.process_main = proc
+                return True
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                pass
+            self._last_audio_error = f"ffmpeg {input_spec}: {get_stderr() or 'неизвестная ошибка'}"
+            try:
+                proc.terminate()
+            except Exception:
+                pass
         return False
 
     def _start_macos_default(self):
         """Запускает запись дефолтного устройства AVFoundation в self.filename."""
-        try:
-            proc = self._popen([
-                self.ffmpeg_bin, "-y",
-                "-f", "avfoundation", "-i", ":default",
-                "-ar", "48000", "-ac", "2", self.filename,
-            ])
-        except Exception:
-            return False
-        time.sleep(0.4)
-        if proc.poll() is None:
-            self.process_main = proc
-            return True
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-        return False
+        return self._start_macos_capture(None, self.filename, key="main")
 
     def _start_macos_all_sources(self):
         """Системный звук (loopback-устройство) + микрофон на macOS."""

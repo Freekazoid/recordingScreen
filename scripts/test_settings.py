@@ -178,6 +178,36 @@ def test_paths():
                   sm.default_settings_file() == os.path.join(fake_bin, "default_settings.json"),
                   sm.default_settings_file())
 
+    # B6: frozen + writable AppImage extract-and-run -> база в XDG, не в temp
+    with tempfile.TemporaryDirectory() as td:
+        extracted = os.path.join(td, "appimage_extracted_123456", "usr", "bin", "ScreenRecorder")
+        os.makedirs(extracted)
+        exe = os.path.join(extracted, "ScreenRecorder")
+        open(exe, "w").close()
+        xdg = os.path.join(td, "xdg")
+        with patch_env(frozen=True, executable=exe, xdg=xdg):
+            got = app_paths.get_writable_base_dir()
+            check("B6 frozen+AppImage extract-and-run: база в XDG, не в распаковке",
+                  got == os.path.join(xdg, "ScreenRecorder"), got)
+
+    # B7: детектор временных каталогов frozen-сборки
+    temp_like = [
+        "/tmp/.mount_ScreenXXXX/usr/bin/ScreenRecorder",
+        "/tmp/appimage_extracted_123456/usr/bin/ScreenRecorder",
+        "/tmp/_MEI123456",
+    ]
+    persistent_like = [
+        "/home/user/Portable/ScreenRecorder",
+        "/opt/ScreenRecorder",
+        "/tmp/tmpXXXX/ScreenRecorder",
+    ]
+    ok_temp = all(app_paths._is_pyinstaller_temp_dir(p) for p in temp_like)
+    ok_persist = not any(app_paths._is_pyinstaller_temp_dir(p) for p in persistent_like)
+    check("B7 временные каталоги frozen распознаются", ok_temp,
+          str([p for p in temp_like if not app_paths._is_pyinstaller_temp_dir(p)]))
+    check("B7b постоянные каталоги не считаются временными", ok_persist,
+          str([p for p in persistent_like if app_paths._is_pyinstaller_temp_dir(p)]))
+
 
 # ── C. normalize(): типы, фильтры, миграции ─────────────────────────────
 def test_normalize():
@@ -281,6 +311,16 @@ def test_load_save():
             loaded = sm.load_settings()
             check("D11 круг типов: int->str, bool сохранён",
                   loaded["expected_speakers"] == "3" and loaded["enable_diarization"] is False)
+
+            # D13: update_settings меняет только переданный ключ и не затирает остальные
+            sm.save_settings({"transcription_engine": "vosk", "diarization_method": "nemo",
+                              "compute_device": "gpu"})
+            sm.update_settings({"diarization_method": "diarize"})
+            merged = sm.load_settings()
+            check("D13 update_settings сохраняет только изменённый ключ",
+                  merged["diarization_method"] == "diarize"
+                  and merged["transcription_engine"] == "vosk"
+                  and merged["compute_device"] == "gpu", str(merged))
         finally:
             sm.get_writable_base_dir = old  # type: ignore[assignment]
 
