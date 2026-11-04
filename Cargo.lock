@@ -3204,6 +3204,7 @@ dependencies = [
 name = "screenrecorder-application"
 version = "4.0.0-alpha.1"
 dependencies = [
+ "chrono",
  "screenrecorder-domain",
  "serde",
  "serde_json",
