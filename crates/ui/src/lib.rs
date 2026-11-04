@@ -10,7 +10,8 @@ use eframe::egui::{
     TextStyle, Vec2,
 };
 use screenrecorder_adapters::{
-    DownloadProgress, LinuxAudioRecorder, ModelManager, Paths, X11VideoRecorder,
+    AudioDevice, AudioDeviceKind, AudioProbe, DownloadProgress, LinuxAudioRecorder, ModelManager,
+    Paths, X11VideoRecorder,
 };
 use screenrecorder_application::{Settings, SettingsStore};
 use screenrecorder_domain::SessionId;
@@ -70,12 +71,16 @@ pub struct ScreenRecorderApp {
     folder_rx: Option<Receiver<Option<PathBuf>>>,
     folder_target: Option<FolderTarget>,
     settings_dirty: bool,
+    audio_devices: Vec<AudioDevice>,
+    probe_rx: Option<Receiver<Result<AudioProbe, String>>>,
+    probe_note: String,
 }
 
 impl ScreenRecorderApp {
     /// Создаёт приложение с уже загруженными настройками и путями.
     pub fn new(paths: Paths, settings: Settings) -> Self {
         let model_manager = ModelManager::new(paths.models_dir());
+        let audio_devices = LinuxAudioRecorder::list_devices().unwrap_or_default();
         Self {
             paths,
             settings,
@@ -96,6 +101,9 @@ impl ScreenRecorderApp {
             folder_rx: None,
             folder_target: None,
             settings_dirty: false,
+            audio_devices,
+            probe_rx: None,
+            probe_note: String::new(),
         }
     }
 
@@ -256,7 +264,13 @@ impl ScreenRecorderApp {
         let output = session_dir.join("screen.mkv");
         match self.recorder.start(&output, self.settings.capture.fps) {
             Ok(()) => {
-                match self.audio_recorder.start(&session_dir) {
+                let mic_device = self.settings.capture.mic_device.clone();
+                let system_device = self.settings.capture.system_device.clone();
+                match self.audio_recorder.start(
+                    &session_dir,
+                    Some(system_device.as_str()),
+                    Some(mic_device.as_str()),
+                ) {
                     Ok(audio) => {
                         if !audio.warnings.is_empty() {
                             self.log = format!(
@@ -410,6 +424,97 @@ impl ScreenRecorderApp {
                 }
             });
         changed
+    }
+
+    /// Рисует выпадающий список аудиоустройств.
+    fn device_combo(
+        ui: &mut egui::Ui,
+        id: &str,
+        value: &mut String,
+        devices: &[AudioDevice],
+        kind: AudioDeviceKind,
+    ) -> bool {
+        let selected = devices
+            .iter()
+            .find(|device| device.id == *value)
+            .map(|device| device.label.clone())
+            .unwrap_or_else(|| "По умолчанию".to_string());
+        let mut changed = false;
+        egui::ComboBox::from_id_salt(id)
+            .width(210.0)
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_value(value, String::new(), "По умолчанию")
+                    .clicked()
+                {
+                    changed = true;
+                }
+                for device in devices.iter().filter(|device| device.kind == kind) {
+                    if ui
+                        .selectable_value(value, device.id.clone(), device.label.as_str())
+                        .clicked()
+                    {
+                        changed = true;
+                    }
+                }
+            });
+        changed
+    }
+
+    /// Запускает фоновую проверку уровня сигнала.
+    fn start_probe(&mut self, kind: AudioDeviceKind) {
+        if self.probe_rx.is_some() {
+            self.log = "Проверка звука уже идёт.".to_string();
+            return;
+        }
+        let target = match kind {
+            AudioDeviceKind::Mic => self.settings.capture.mic_device.clone(),
+            AudioDeviceKind::System => self.settings.capture.system_device.clone(),
+        };
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let target = if target.trim().is_empty() {
+                None
+            } else {
+                Some(target.as_str())
+            };
+            let result = LinuxAudioRecorder::probe(target, kind).map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+        self.probe_rx = Some(receiver);
+        self.probe_note = "Проверка звука: идёт запись 1 с…".to_string();
+    }
+
+    /// Забирает результат проверки звука.
+    fn poll_probe(&mut self) {
+        let result = match &self.probe_rx {
+            Some(receiver) => match receiver.try_recv() {
+                Ok(result) => result,
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => Err("поток проверки завершился".to_string()),
+            },
+            None => return,
+        };
+        self.probe_rx = None;
+        match result {
+            Ok(probe) => {
+                self.probe_note = if probe.silent {
+                    format!(
+                        "Тихо: RMS {:.1} dBFS, peak {:.1} dBFS",
+                        probe.rms_dbfs, probe.peak_dbfs
+                    )
+                } else {
+                    format!(
+                        "Сигнал есть: RMS {:.1} dBFS, peak {:.1} dBFS",
+                        probe.rms_dbfs, probe.peak_dbfs
+                    )
+                };
+            }
+            Err(error) => {
+                self.probe_note = format!("Ошибка проверки: {error}");
+            }
+        }
     }
 
     /// Рисует строку модели в настройках.
@@ -600,6 +705,55 @@ impl ScreenRecorderApp {
                 }
 
                 ui.add_space(6.0);
+                let devices = self.audio_devices.clone();
+                let probe_note = self.probe_note.clone();
+                let mut probe_mic = false;
+                let mut probe_system = false;
+                Self::section(ui, "Аудио", |ui| {
+                    ui.label("Микрофон:");
+                    ui.horizontal(|ui| {
+                        if Self::device_combo(
+                            ui,
+                            "mic_device",
+                            &mut self.settings.capture.mic_device,
+                            &devices,
+                            AudioDeviceKind::Mic,
+                        ) {
+                            self.settings_dirty = true;
+                        }
+                        if ui.button("Проверить").clicked() {
+                            probe_mic = true;
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.label("Системный звук:");
+                    ui.horizontal(|ui| {
+                        if Self::device_combo(
+                            ui,
+                            "system_device",
+                            &mut self.settings.capture.system_device,
+                            &devices,
+                            AudioDeviceKind::System,
+                        ) {
+                            self.settings_dirty = true;
+                        }
+                        if ui.button("Проверить").clicked() {
+                            probe_system = true;
+                        }
+                    });
+                    if !probe_note.is_empty() {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(probe_note).size(11.0).color(HINT));
+                    }
+                });
+                if probe_mic {
+                    self.start_probe(AudioDeviceKind::Mic);
+                }
+                if probe_system {
+                    self.start_probe(AudioDeviceKind::System);
+                }
+
+                ui.add_space(6.0);
                 let mut pick_models = false;
                 let mut pick_output = false;
 
@@ -759,6 +913,7 @@ impl eframe::App for ScreenRecorderApp {
         self.poll_recording();
         self.poll_download();
         self.poll_folder_picker();
+        self.poll_probe();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BG).inner_margin(Margin::same(5)))
             .show(ui, |ui| {

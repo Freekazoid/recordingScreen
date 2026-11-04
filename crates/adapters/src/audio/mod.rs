@@ -2,4 +2,6 @@
 
 pub mod linux;
 
-pub use linux::{AudioError, AudioStart, LinuxAudioRecorder};
+pub use linux::{
+    AudioDevice, AudioDeviceKind, AudioError, AudioProbe, AudioStart, LinuxAudioRecorder,
+};

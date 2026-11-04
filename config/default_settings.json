@@ -7,7 +7,9 @@
     "fps": 20,
     "video_codec": "h264",
     "audio_sample_rate": 48000,
-    "audio_channels": 2
+    "audio_channels": 2,
+    "mic_device": "",
+    "system_device": ""
   },
   "transcription": {
     "enabled": true,

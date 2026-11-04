@@ -10,6 +10,8 @@ screenrecorder-application = { path = "../application" }
 screenrecorder-domain = { path = "../domain" }
 directories.workspace = true
 dirs.workspace = true
+hound.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 ureq.workspace = true
 

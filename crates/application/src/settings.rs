@@ -51,6 +51,8 @@ pub struct CaptureSettings {
     pub video_codec: String,
     pub audio_sample_rate: u32,
     pub audio_channels: u16,
+    pub mic_device: String,
+    pub system_device: String,
 }
 
 impl Default for CaptureSettings {
@@ -61,6 +63,8 @@ impl Default for CaptureSettings {
             video_codec: "h264".to_string(),
             audio_sample_rate: 48_000,
             audio_channels: 2,
+            mic_device: String::new(),
+            system_device: String::new(),
         }
     }
 }
