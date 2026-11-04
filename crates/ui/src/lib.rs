@@ -85,6 +85,7 @@ pub struct ScreenRecorderApp {
     exporting: bool,
     audio_offset_ms: i64,
     audio_only: bool,
+    recording_mode: Option<&'static str>,
     mic_dbfs: f32,
     system_dbfs: f32,
     last_levels: Instant,
@@ -128,6 +129,7 @@ impl ScreenRecorderApp {
             exporting: false,
             audio_offset_ms: 0,
             audio_only: false,
+            recording_mode: None,
             mic_dbfs: -90.0,
             system_dbfs: -90.0,
             last_levels: Instant::now(),
@@ -354,7 +356,7 @@ impl ScreenRecorderApp {
         };
         self.area_rx = None;
         match result {
-            Ok(region) => self.start_region_recording(region),
+            Ok(region) => self.start_region_recording(region, "Область экрана"),
             Err(error) => {
                 self.status = format!("Область не выбрана: {error}");
                 self.log = format!("Выбор области: {error}");
@@ -363,7 +365,7 @@ impl ScreenRecorderApp {
     }
 
     /// Запускает запись выбранной области.
-    fn start_region_recording(&mut self, region: Region) {
+    fn start_region_recording(&mut self, region: Region, mode: &'static str) {
         let session_id = SessionId::new();
         let session_dir = self.paths.session_dir(session_id.as_str());
         let output = session_dir.join("screen.mkv");
@@ -379,6 +381,7 @@ impl ScreenRecorderApp {
                     self.using_wayland = true;
                     self.wayland_pending = true;
                     self.recording = true;
+                    self.recording_mode = Some(mode);
                     self.audio_offset_ms = 0;
                     self.session_dir = Some(session_dir);
                     self.status = "Wayland: ожидание доступа к области…".to_string();
@@ -401,6 +404,7 @@ impl ScreenRecorderApp {
                 self.start_audio(&session_dir);
                 self.audio_offset_ms = started.elapsed().as_millis() as i64;
                 self.recording = true;
+                self.recording_mode = Some(mode);
                 self.session_dir = Some(session_dir);
                 self.status = format!("Идёт запись области {}×{}", region.width, region.height);
             }
@@ -427,6 +431,7 @@ impl ScreenRecorderApp {
                     self.using_wayland = true;
                     self.wayland_pending = true;
                     self.recording = true;
+                    self.recording_mode = Some("Программа");
                     self.audio_offset_ms = 0;
                     self.session_dir = Some(session_dir);
                     self.status = "Wayland: выбор окна…".to_string();
@@ -454,7 +459,7 @@ impl ScreenRecorderApp {
     }
 
     /// Запускает или останавливает запись экрана.
-    fn toggle_recording(&mut self, mode: &str) {
+    fn toggle_recording(&mut self, mode: &'static str) {
         if self.recording {
             self.stop_recording();
             return;
@@ -473,10 +478,12 @@ impl ScreenRecorderApp {
             self.start_audio(&session_dir);
             if self.audio_recorder.is_running() {
                 self.recording = true;
+                self.recording_mode = Some("Только аудио");
                 self.session_dir = Some(session_dir);
                 self.status = "Идёт аудиозапись".to_string();
             } else {
                 self.audio_only = false;
+                self.recording_mode = None;
                 self.status = "Не удалось начать запись звука".to_string();
             }
             return;
@@ -492,6 +499,7 @@ impl ScreenRecorderApp {
         }
 
         self.audio_only = false;
+        self.recording_mode = None;
         let session_id = SessionId::new();
         let session_dir = self.paths.session_dir(session_id.as_str());
         let output = session_dir.join("screen.mkv");
@@ -505,6 +513,7 @@ impl ScreenRecorderApp {
                     self.using_wayland = true;
                     self.wayland_pending = true;
                     self.recording = true;
+                    self.recording_mode = Some("Весь экран");
                     self.audio_offset_ms = 0;
                     self.session_dir = Some(session_dir);
                     self.status = "Wayland: ожидание доступа к экрану…".to_string();
@@ -526,6 +535,7 @@ impl ScreenRecorderApp {
                 self.start_audio(&session_dir);
                 self.audio_offset_ms = video_started.elapsed().as_millis() as i64;
                 self.recording = true;
+                self.recording_mode = Some(mode);
                 self.session_dir = Some(session_dir);
                 self.status = format!("Идёт запись: {mode}");
             }
@@ -541,8 +551,10 @@ impl ScreenRecorderApp {
         if !self.recording {
             return;
         }
+        let was_wayland_pending = self.wayland_pending;
         self.recording = false;
         self.wayland_pending = false;
+        self.recording_mode = None;
         let audio_only = self.audio_only;
         self.audio_only = false;
         let audio_result = self
@@ -552,7 +564,12 @@ impl ScreenRecorderApp {
         let video_result: Result<(), String> = if audio_only {
             Ok(())
         } else if self.using_wayland {
-            self.wayland_recorder.stop()
+            if was_wayland_pending {
+                self.wayland_recorder.request_stop();
+                Ok(())
+            } else {
+                self.wayland_recorder.stop()
+            }
         } else {
             self.recorder.stop().map_err(|error| error.to_string())
         };
@@ -562,6 +579,11 @@ impl ScreenRecorderApp {
             .as_ref()
             .map(|dir| dir.display().to_string())
             .unwrap_or_else(|| "каталог сессии".to_string());
+        if was_wayland_pending {
+            self.status = "Запись отменена".to_string();
+            self.log = "Ожидание портала прервано; запись не началась.".to_string();
+            return;
+        }
         match (video_result, audio_result) {
             (Ok(()), Ok(())) => {
                 self.status = "Запись остановлена".to_string();
@@ -723,6 +745,7 @@ impl ScreenRecorderApp {
                     Err(error) => {
                         self.recording = false;
                         self.using_wayland = false;
+                        self.recording_mode = None;
                         let _ = self.wayland_recorder.stop();
                         self.status = format!("Ошибка Wayland: {error}");
                         self.log = format!("Портал не запустил запись: {error}");
@@ -740,6 +763,7 @@ impl ScreenRecorderApp {
             };
             if !video_running && !self.audio_recorder.is_running() {
                 self.recording = false;
+                self.recording_mode = None;
                 let audio_only = self.audio_only;
                 self.audio_only = false;
                 if let Some(error) = self.wayland_recorder.take_error() {
@@ -1028,7 +1052,7 @@ impl ScreenRecorderApp {
             self.show_windows = false;
         }
         if let Some(region) = selected {
-            self.start_region_recording(region);
+            self.start_region_recording(region, "Программа");
         }
     }
 
@@ -1047,53 +1071,64 @@ impl ScreenRecorderApp {
 
         ui.vertical_centered(|ui| {
             let recording = self.recording;
-            let fullscreen_label = if recording {
-                "Остановить запись"
-            } else {
-                "Весь экран"
+            let active = self.recording_mode;
+            let state = |mode: &'static str| {
+                (
+                    if active == Some(mode) {
+                        "Остановить запись"
+                    } else {
+                        mode
+                    },
+                    !recording || active == Some(mode),
+                )
             };
+
+            let (label, enabled) = state("Весь экран");
             if Self::record_button(
                 ui,
                 egui::Image::new(egui::include_image!("../../../assets/fullscreen.png"))
                     .fit_to_exact_size(Vec2::new(24.0, 24.0)),
-                fullscreen_label,
-                true,
+                label,
+                enabled,
             )
             .clicked()
             {
                 self.toggle_recording("Весь экран");
             }
             ui.add_space(8.0);
+            let (label, enabled) = state("Область экрана");
             if Self::record_button(
                 ui,
                 egui::Image::new(egui::include_image!("../../../assets/area.png"))
                     .fit_to_exact_size(Vec2::new(24.0, 24.0)),
-                "Область экрана",
-                !recording,
+                label,
+                enabled,
             )
             .clicked()
             {
                 self.toggle_recording("Область экрана");
             }
             ui.add_space(8.0);
+            let (label, enabled) = state("Программа");
             if Self::record_button(
                 ui,
                 egui::Image::new(egui::include_image!("../../../assets/program.png"))
                     .fit_to_exact_size(Vec2::new(24.0, 24.0)),
-                "Программа",
-                !recording,
+                label,
+                enabled,
             )
             .clicked()
             {
                 self.toggle_recording("Программа");
             }
             ui.add_space(8.0);
+            let (label, enabled) = state("Только аудио");
             if Self::record_button(
                 ui,
                 egui::Image::new(egui::include_image!("../../../assets/empty.png"))
                     .fit_to_exact_size(Vec2::new(24.0, 24.0)),
-                "Только аудио",
-                !recording,
+                label,
+                enabled,
             )
             .clicked()
             {

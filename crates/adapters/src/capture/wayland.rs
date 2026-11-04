@@ -86,6 +86,11 @@ impl WaylandPortalRecorder {
                     return;
                 }
             };
+            // Пользователь мог нажать «Остановить», пока висел диалог портала.
+            if stop_rx.try_recv().is_ok() {
+                let _ = start_tx.send(Err("остановлено пользователем".to_string()));
+                return;
+            }
 
             let raw_fd = fd.as_raw_fd();
             // GStreamer должен унаследовать fd, поэтому снимаем CLOEXEC.
@@ -204,12 +209,22 @@ impl WaylandPortalRecorder {
         self.active.store(false, Ordering::SeqCst);
         Ok(())
     }
+
+    /// Просит остановиться, не блокируя UI (портал может ждать диалог).
+    pub fn request_stop(&mut self) {
+        if let Some(sender) = self.stop_tx.take() {
+            let _ = sender.send(());
+        }
+        self.start_rx = None;
+        self.active.store(false, Ordering::SeqCst);
+        self.clear_finished();
+    }
 }
 
 impl Drop for WaylandPortalRecorder {
     /// Гарантирует остановку портальной сессии.
     fn drop(&mut self) {
-        let _ = self.stop();
+        self.request_stop();
     }
 }
 
