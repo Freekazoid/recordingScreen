@@ -102,6 +102,7 @@ pub struct ScreenRecorderApp {
     wayland_recorder: WaylandPortalRecorder,
     using_wayland: bool,
     wayland_pending: bool,
+    wayland_started_at: Option<Instant>,
     audio_recorder: LinuxAudioRecorder,
     recording: bool,
     session_dir: Option<PathBuf>,
@@ -188,6 +189,7 @@ impl ScreenRecorderApp {
             wayland_recorder: WaylandPortalRecorder::new(),
             using_wayland: false,
             wayland_pending: false,
+            wayland_started_at: None,
             audio_recorder: LinuxAudioRecorder::new(),
             recording: false,
             session_dir: None,
@@ -806,6 +808,7 @@ impl ScreenRecorderApp {
                 Ok(()) => {
                     self.using_wayland = true;
                     self.wayland_pending = true;
+                    self.wayland_started_at = Some(Instant::now());
                     self.recording = true;
                     self.recording_mode = Some("Весь экран");
                     self.audio_offset_ms = 0;
@@ -820,9 +823,9 @@ impl ScreenRecorderApp {
             }
             return;
         }
+        let video_started = Instant::now();
         match self.recorder.start(&output, self.settings.capture.fps) {
             Ok(()) => {
-                let video_started = Instant::now();
                 self.using_wayland = false;
                 self.wayland_pending = false;
                 self.start_audio(&session_dir);
@@ -858,6 +861,7 @@ impl ScreenRecorderApp {
             Ok(()) => {
                 self.using_wayland = true;
                 self.wayland_pending = true;
+                self.wayland_started_at = Some(Instant::now());
                 self.recording = true;
                 self.recording_mode = Some("Программа");
                 self.audio_offset_ms = 0;
@@ -1031,6 +1035,7 @@ impl ScreenRecorderApp {
                 Ok(()) => {
                     self.using_wayland = true;
                     self.wayland_pending = true;
+                    self.wayland_started_at = Some(Instant::now());
                     self.recording = true;
                     self.recording_mode = Some(mode);
                     self.audio_offset_ms = 0;
@@ -1045,12 +1050,12 @@ impl ScreenRecorderApp {
             }
             return;
         }
+        let started = Instant::now();
         match self
             .recorder
             .start_region(&output, self.settings.capture.fps, Some(region))
         {
             Ok(()) => {
-                let started = Instant::now();
                 self.using_wayland = false;
                 self.wayland_pending = false;
                 self.start_audio(&session_dir);
@@ -1118,6 +1123,7 @@ impl ScreenRecorderApp {
         let was_wayland_active = self.using_wayland && self.wayland_recorder.is_running();
         self.recording = false;
         self.wayland_pending = false;
+        self.wayland_started_at = None;
         self.recording_mode = None;
         let audio_only = self.audio_only;
         self.audio_only = false;
@@ -1470,6 +1476,10 @@ impl ScreenRecorderApp {
                 self.wayland_pending = false;
                 match result {
                     Ok(()) => {
+                        if let Some(started) = self.wayland_started_at.take() {
+                            let offset = started.elapsed().as_millis() as i64;
+                            self.set_audio_offset(offset);
+                        }
                         if let Some(session_dir) = self.session_dir.clone() {
                             self.start_audio(&session_dir);
                             append_session_log(&session_dir, "портал ScreenCast запущен");
@@ -1480,6 +1490,7 @@ impl ScreenRecorderApp {
                     Err(error) => {
                         self.recording = false;
                         self.using_wayland = false;
+                        self.wayland_started_at = None;
                         self.recording_mode = None;
                         let _ = self.wayland_recorder.stop();
                         self.fail_manifest(&error);
