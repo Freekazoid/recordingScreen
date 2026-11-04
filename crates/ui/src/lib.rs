@@ -17,8 +17,9 @@ use screenrecorder_adapters::{
     take_screenshot,
 };
 use screenrecorder_application::{
-    ManifestState, MlWorker, Rect, SessionManifest, Settings, SettingsStore, TrackManifest,
-    Transcript, append_session_log, load_manifest, recover_incomplete, save_manifest,
+    HistoryStore, ManifestState, MlWorker, Rect, SessionManifest, SessionRecord, Settings,
+    SettingsStore, TrackManifest, Transcript, append_session_log, display_date, import_manifests,
+    load_manifest, recover_incomplete, save_manifest,
 };
 use screenrecorder_domain::{SessionId, TrackKind, TrackStats, TrackStatus};
 use std::path::{Path, PathBuf};
@@ -77,6 +78,7 @@ const GREEN: Color32 = Color32::from_rgb(0x46, 0xb8, 0x6f);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Record,
+    History,
     Settings,
     About,
 }
@@ -125,6 +127,8 @@ pub struct ScreenRecorderApp {
     preflight_warnings: Vec<String>,
     transcript_rx: Option<Receiver<Result<TranscriptOutput, String>>>,
     transcribing: bool,
+    history: HistoryStore,
+    history_records: Vec<SessionRecord>,
 }
 
 impl ScreenRecorderApp {
@@ -132,16 +136,26 @@ impl ScreenRecorderApp {
     pub fn new(paths: Paths, settings: Settings) -> Self {
         let model_manager = ModelManager::new(paths.models_dir());
         let audio_devices = LinuxAudioRecorder::list_devices().unwrap_or_default();
-        let recovered = recover_incomplete(&paths.data_dir.join("recordings")).unwrap_or_default();
-        let log = if recovered.is_empty() {
+        let recordings = paths.data_dir.join("recordings");
+        let recovered = recover_incomplete(&recordings).unwrap_or_default();
+        let history = HistoryStore::new(paths.data_dir.join("history.sqlite3"));
+        let mut log = if recovered.is_empty() {
             "Готово. Проверьте систему и настройки.".to_string()
         } else {
             format!(
                 "Восстановлено незавершённых сессий: {}. Файлы лежат в {}.",
                 recovered.len(),
-                paths.data_dir.join("recordings").display()
+                recordings.display()
             )
         };
+        if let Err(error) = history.init() {
+            log = format!("История недоступна: {error}");
+        } else if let Ok(imported) = import_manifests(&history, &recordings)
+            && imported > 0
+        {
+            log = format!("{log} В истории записей: {imported}.");
+        }
+        let history_records = history.list(100).unwrap_or_default();
         Self {
             paths,
             settings,
@@ -185,7 +199,22 @@ impl ScreenRecorderApp {
             preflight_warnings: Vec::new(),
             transcript_rx: None,
             transcribing: false,
+            history,
+            history_records,
         }
+    }
+
+    /// Обновляет запись в истории по манифесту сессии.
+    fn sync_history(&mut self, session_dir: &Path) {
+        let Ok(manifest) = load_manifest(session_dir) else {
+            return;
+        };
+        let record = SessionRecord::from_manifest(&manifest, session_dir);
+        if let Err(error) = self.history.upsert(&record) {
+            self.log = format!("История: {error}");
+            return;
+        }
+        self.history_records = self.history.list(100).unwrap_or_default();
     }
 
     /// Создаёт манифест и журнал сессии перед стартом захвата.
@@ -227,6 +256,7 @@ impl ScreenRecorderApp {
             ),
         );
         self.manifest = Some(manifest);
+        self.sync_history(session_dir);
     }
 
     /// Преобразует область в прямоугольник манифеста.
@@ -279,9 +309,10 @@ impl ScreenRecorderApp {
         };
         manifest.warn(reason);
         manifest.finish(ManifestState::Failed);
-        if let Some(dir) = &self.session_dir {
-            let _ = save_manifest(dir, &manifest);
-            append_session_log(dir, &format!("ошибка: {reason}"));
+        if let Some(dir) = self.session_dir.clone() {
+            let _ = save_manifest(&dir, &manifest);
+            append_session_log(&dir, &format!("ошибка: {reason}"));
+            self.sync_history(&dir);
         }
     }
 
@@ -292,9 +323,10 @@ impl ScreenRecorderApp {
         };
         manifest.warn(reason);
         manifest.finish(ManifestState::Cancelled);
-        if let Some(dir) = &self.session_dir {
-            let _ = save_manifest(dir, &manifest);
-            append_session_log(dir, reason);
+        if let Some(dir) = self.session_dir.clone() {
+            let _ = save_manifest(&dir, &manifest);
+            append_session_log(&dir, reason);
+            self.sync_history(&dir);
         }
     }
 
@@ -414,6 +446,7 @@ impl ScreenRecorderApp {
                 manifest.warnings.len()
             ),
         );
+        self.sync_history(&dir);
     }
 
     /// Открывает нативный диалог выбора каталога.
@@ -1175,6 +1208,7 @@ impl ScreenRecorderApp {
                         &dir,
                         &format!("транскрипт: {}", output.text_path.display()),
                     );
+                    self.sync_history(&dir);
                 }
             }
             Err(error) => {
@@ -1291,6 +1325,7 @@ impl ScreenRecorderApp {
                     manifest.set_exported(path.display().to_string());
                     let _ = save_manifest(&dir, &manifest);
                     append_session_log(&dir, &format!("экспорт: {}", path.display()));
+                    self.sync_history(&dir);
                 }
                 if let Some(dir) = self.session_dir.clone() {
                     self.start_transcription(&dir);
@@ -1413,12 +1448,13 @@ impl ScreenRecorderApp {
 
     /// Рисует вкладки в стиле текущего приложения.
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
-        let width = ui.available_width() / 3.0;
+        let width = ui.available_width() / 4.0;
         let previous_spacing = ui.spacing().item_spacing.x;
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.horizontal(|ui| {
             for (screen, label) in [
                 (Screen::Record, "Запись"),
+                (Screen::History, "История"),
                 (Screen::Settings, "Настройки"),
                 (Screen::About, "О авторе"),
             ] {
@@ -1803,6 +1839,71 @@ impl ScreenRecorderApp {
         });
     }
 
+    /// Рисует вкладку «История».
+    fn draw_history(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new("История записей")
+                .size(16.0)
+                .strong()
+                .color(TEXT),
+        );
+        ui.add_space(6.0);
+        let records = self.history_records.clone();
+        if records.is_empty() {
+            ui.label(RichText::new("Записей пока нет.").color(HINT));
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for record in records {
+                    let title = format!("{} · {}", record.title, display_date(&record.created_at));
+                    Self::section(ui, &title, |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {}",
+                                state_label(&record.state),
+                                record.mode
+                            ))
+                            .size(12.0)
+                            .color(TEXT),
+                        );
+                        if let Some(export) = &record.export_path {
+                            ui.label(
+                                RichText::new(format!("Файл: {export}"))
+                                    .size(11.0)
+                                    .color(HINT),
+                            );
+                        }
+                        if let Some(transcript) = &record.transcript_path {
+                            ui.label(
+                                RichText::new(format!("Текст: {transcript}"))
+                                    .size(11.0)
+                                    .color(HINT),
+                            );
+                        }
+                        if let Some(error) = &record.error {
+                            ui.label(RichText::new(error).size(11.0).color(RED));
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Открыть папку").clicked() {
+                                let _ = Command::new("xdg-open")
+                                    .arg(&record.output_dir)
+                                    .stdin(std::process::Stdio::null())
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .spawn();
+                            }
+                            if ui.button("Копировать путь").clicked() {
+                                ui.ctx().copy_text(record.output_dir.clone());
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+                }
+            });
+    }
+
     /// Рисует вкладку «Настройки».
     fn draw_settings(&mut self, ui: &mut egui::Ui) {
         let whisper_ready = self.model_manager.is_downloaded("whisper");
@@ -2062,12 +2163,27 @@ impl eframe::App for ScreenRecorderApp {
                 ui.add_space(4.0);
                 match self.screen {
                     Screen::Record => self.draw_record(ui),
+                    Screen::History => self.draw_history(ui),
                     Screen::Settings => self.draw_settings(ui),
                     Screen::About => self.draw_about(ui),
                 }
             });
         self.window_picker(ui.ctx());
         self.persist_settings();
+    }
+}
+
+/// Переводит состояние истории в русскую подпись.
+fn state_label(state: &str) -> &'static str {
+    match state {
+        "recording" => "Идёт запись",
+        "finalizing" => "Завершение",
+        "recorded" => "Записано",
+        "exported" => "Экспортировано",
+        "failed" => "Ошибка",
+        "interrupted" => "Прервано",
+        "cancelled" => "Отменено",
+        _ => "Неизвестно",
     }
 }
 

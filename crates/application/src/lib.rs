@@ -1,8 +1,11 @@
 //! Прикладной слой: настройки и сценарии использования.
 
+pub mod history;
 pub mod manifest;
 pub mod ml_client;
 pub mod settings;
+
+pub use history::{HistoryError, HistoryStore, SessionRecord, display_date, import_manifests};
 
 pub use manifest::{
     MANIFEST_SCHEMA_VERSION, ManifestError, ManifestState, RecoveredSession, Rect, SessionManifest,
