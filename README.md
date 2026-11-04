@@ -25,7 +25,8 @@ cargo run -p screenrecorder-app
 `screenrecorder-app` при запуске ищет рядом с собой:
 
 - `screenrecorder-ml` — ASR на whisper-rs;
-- `screenrecorder-diarize` — диаризация sherpa-onnx.
+- `screenrecorder-diarize` — диаризация sherpa-onnx;
+- `screenrecorder-nemo` — альтернативная диаризация NeMo Sortformer.
 
 Если отдельного `screenrecorder-ml` нет, приложение использует встроенный
 режим `--ml-worker`. Диаризация всегда запускается отдельным процессом,
@@ -34,11 +35,19 @@ cargo run -p screenrecorder-app
 
 ### Модели
 
+В v4 доступны только:
+- ASR — whisper-rs `large-v3-turbo`;
+- диаризация — sherpa-onnx или NeMo Sortformer;
+- VAD — Silero для whisper.cpp.
+
+Vosk и PyAnnote в v4 не поддерживаются; упоминания ниже относятся к legacy 3.x.
+
 Модели скачиваются из раздела «Настройки → Модели»:
 
 - `whisper` — GGML `large-v3-turbo`;
 - `vad` — Silero VAD для whisper.cpp;
-- `diarization` — сегментация + speaker embeddings для sherpa-onnx.
+- `diarization` — сегментация + speaker embeddings для sherpa-onnx;
+- `nemo` — NeMo Sortformer (Nemotron-3 diarization, ONNX).
 
 Файлы лежат в каталоге данных приложения (`models/<id>/`). После скачивания
 проверяется SHA256.
@@ -52,8 +61,10 @@ cargo run -p screenrecorder-app
 - Preflight-проверка микрофона и системного звука.
 - ASR whisper-rs с VAD, таймкодами и экспортом TXT/MD/SRT/VTT/JSON.
 - Копии транскриптов сохраняются рядом с экспортированным видео.
-- Channel-aware транскрипция system/mic и диаризация sherpa-onnx.
+- Channel-aware транскрипция system/mic; диаризация sherpa-onnx или NeMo.
 - SQLite-история сессий и задач; удаление записи из истории.
+- Трей, глобальная горячая клавиша Ctrl+Shift+R, системные уведомления.
+- На вкладке «Запись» вместо текстового журнала — этапы и прогресс.
 - Сохранение доступа ScreenCast через restore-token (без повторного диалога).
 
 ### Ограничения текущего среза
