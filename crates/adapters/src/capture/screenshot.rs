@@ -28,7 +28,7 @@ pub fn take_screenshot(output: &Path) -> Result<PathBuf, String> {
 
 /// Снимок одного кадра из ScreenCast-потока.
 fn take_screenshot_wayland(output: &Path) -> Result<PathBuf, String> {
-    let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
+    let runtime = portal::runtime()?;
     let (proxy, session, fd, node_id) = runtime.block_on(async {
         tokio::time::timeout(Duration::from_secs(60), open_stream())
             .await
@@ -36,14 +36,14 @@ fn take_screenshot_wayland(output: &Path) -> Result<PathBuf, String> {
     })?;
     let raw_fd = fd.as_raw_fd();
     if unsafe { libc::fcntl(raw_fd, libc::F_SETFD, 0) } == -1 {
-        close_screenshot_session(&runtime, &session);
+        close_screenshot_session(runtime, &session);
         return Err("не удалось подготовить PipeWire fd".to_string());
     }
     let log_path = output.with_extension("gst.log");
     let log = match std::fs::File::create(&log_path) {
         Ok(log) => log,
         Err(error) => {
-            close_screenshot_session(&runtime, &session);
+            close_screenshot_session(runtime, &session);
             return Err(format!("лог GStreamer {}: {error}", log_path.display()));
         }
     };
@@ -71,7 +71,7 @@ fn take_screenshot_wayland(output: &Path) -> Result<PathBuf, String> {
     {
         Ok(child) => child,
         Err(error) => {
-            close_screenshot_session(&runtime, &session);
+            close_screenshot_session(runtime, &session);
             return Err(format!("gst-launch-1.0: {error}"));
         }
     };
@@ -85,18 +85,18 @@ fn take_screenshot_wayland(output: &Path) -> Result<PathBuf, String> {
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                close_screenshot_session(&runtime, &session);
+                close_screenshot_session(runtime, &session);
                 return Err("таймаут получения кадра (8 с)".to_string());
             }
             Err(error) => {
-                close_screenshot_session(&runtime, &session);
+                close_screenshot_session(runtime, &session);
                 return Err(format!("ожидание gst: {error}"));
             }
         }
     };
     // Портальная сессия должна закрываться сразу: иначе следующий запрос
     // ScreenCast (например, для записи области) повисает без диалога.
-    close_screenshot_session(&runtime, &session);
+    close_screenshot_session(runtime, &session);
     drop(fd);
     drop(proxy);
 

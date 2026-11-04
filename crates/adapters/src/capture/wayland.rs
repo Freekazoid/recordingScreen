@@ -79,7 +79,7 @@ impl WaylandPortalRecorder {
         let worker_error = Arc::clone(&error);
 
         let worker = thread::spawn(move || {
-            let runtime = match tokio::runtime::Runtime::new() {
+            let runtime = match portal::runtime() {
                 Ok(runtime) => runtime,
                 Err(error) => {
                     let _ = start_tx.send(Err(format!("Tokio: {error}")));
@@ -98,7 +98,7 @@ impl WaylandPortalRecorder {
             // Пользователь мог нажать «Остановить», пока висел диалог портала.
             if stop_requested(&stop_rx) {
                 let _ = start_tx.send(Err("остановлено пользователем".to_string()));
-                close_portal_session(&runtime, &session);
+                close_portal_session(runtime, &session);
                 return;
             }
 
@@ -106,7 +106,7 @@ impl WaylandPortalRecorder {
             // GStreamer должен унаследовать fd, поэтому снимаем CLOEXEC.
             if unsafe { libc::fcntl(raw_fd, libc::F_SETFD, 0) } == -1 {
                 let _ = start_tx.send(Err("не удалось подготовить PipeWire fd".to_string()));
-                close_portal_session(&runtime, &session);
+                close_portal_session(runtime, &session);
                 return;
             }
 
@@ -114,7 +114,7 @@ impl WaylandPortalRecorder {
                 Ok(child) => child,
                 Err(error) => {
                     let _ = start_tx.send(Err(error));
-                    close_portal_session(&runtime, &session);
+                    close_portal_session(runtime, &session);
                     return;
                 }
             };
@@ -129,7 +129,7 @@ impl WaylandPortalRecorder {
                     *slot = Some(message.clone());
                 }
                 let _ = start_tx.send(Err(message));
-                close_portal_session(&runtime, &session);
+                close_portal_session(runtime, &session);
                 return;
             }
             worker_active.store(true, Ordering::SeqCst);
@@ -150,7 +150,7 @@ impl WaylandPortalRecorder {
             }
             let _ = stop_process(&mut child);
             worker_active.store(false, Ordering::SeqCst);
-            close_portal_session(&runtime, &session);
+            close_portal_session(runtime, &session);
             drop(fd);
             drop(proxy);
         });

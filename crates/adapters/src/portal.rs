@@ -6,6 +6,7 @@
 //! запрос открывает своё соединение. На нём же регистрируется app_id, чтобы
 //! разрешения ScreenCast сохранялись стабильно.
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -14,6 +15,29 @@ pub(crate) const PORTAL_APP_ID: &str = "io.github.freekazoid.recordingscreen";
 
 /// Признак того, что Registry-интерфейс портала доступен.
 static REGISTRY_AVAILABLE: AtomicBool = AtomicBool::new(true);
+
+/// Общий runtime для всех портальных запросов.
+///
+/// Если создавать runtime на каждый запрос и сразу ронять его, фоновые
+/// задачи zbus/ashpd остаются без реактора и паникуют с сообщением
+/// «there is no reactor running». Один runtime живёт весь процесс.
+static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+/// Возвращает общий runtime для портальных запросов.
+pub(crate) fn runtime() -> Result<&'static tokio::runtime::Runtime, String> {
+    if let Some(runtime) = RUNTIME.get() {
+        return Ok(runtime);
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("screenrecorder-portal")
+        .build()
+        .map_err(|error| format!("Tokio: {error}"))?;
+    match RUNTIME.set(runtime) {
+        Ok(()) => Ok(RUNTIME.get().expect("runtime установлен")),
+        Err(_) => Ok(RUNTIME.get().expect("runtime уже установлен")),
+    }
+}
 
 /// Создаёт D-Bus-соединение и регистрирует на нём app_id.
 ///
@@ -47,7 +71,7 @@ mod tests {
     #[test]
     #[ignore = "нужен живой xdg-desktop-portal"]
     fn host_app_registration_works() {
-        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let runtime = runtime().expect("runtime");
         runtime.block_on(async {
             let connection = ashpd::zbus::Connection::session()
                 .await
@@ -59,15 +83,15 @@ mod tests {
         });
     }
 
-    /// Проверяет, что портал доступен из двух последовательных runtime.
+    /// Проверяет два последовательных запроса к порталу.
     ///
     /// Тест создаёт и сразу закрывает пустые портальные сессии; диалог
     /// пользователю не показывается. Требует живой xdg-desktop-portal.
     #[test]
     #[ignore = "нужен живой xdg-desktop-portal"]
-    fn portal_connection_works_across_runtimes() {
+    fn portal_connection_survives_sequential_requests() {
+        let runtime = runtime().expect("runtime");
         for _ in 0..2 {
-            let runtime = tokio::runtime::Runtime::new().expect("runtime");
             runtime.block_on(async {
                 let connection = connect().await.expect("соединение с порталом");
                 let proxy = ashpd::desktop::screencast::Screencast::with_connection(connection)
@@ -82,7 +106,6 @@ mod tests {
                 .expect("CreateSession");
                 let _ = session.close().await;
             });
-            drop(runtime);
         }
     }
 }
