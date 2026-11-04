@@ -21,6 +21,13 @@ enum DownloadEvent {
     Finished(Result<(), String>),
 }
 
+/// Каталог, который выбирает пользователь.
+#[derive(Debug, Clone, Copy)]
+enum FolderTarget {
+    Models,
+    Output,
+}
+
 const BG: Color32 = Color32::from_rgb(0x20, 0x20, 0x20);
 const TEXT: Color32 = Color32::from_rgb(0xcc, 0xca, 0xca);
 const BTN: Color32 = Color32::from_rgb(0x35, 0x35, 0x35);
@@ -80,6 +87,33 @@ impl ScreenRecorderApp {
             download_model: None,
             download_progress: 0.0,
         }
+    }
+
+    /// Открывает нативный диалог выбора каталога.
+    fn pick_folder(&mut self, target: FolderTarget) {
+        let (title, current) = match target {
+            FolderTarget::Models => ("Папка моделей", &self.settings.models_dir),
+            FolderTarget::Output => ("Папка результатов", &self.settings.output_dir),
+        };
+        let start = if current.trim().is_empty() {
+            self.paths.data_dir.clone()
+        } else {
+            PathBuf::from(current)
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .set_title(title)
+            .set_directory(start)
+            .pick_folder()
+        else {
+            return;
+        };
+        let value = path.to_string_lossy().to_string();
+        match target {
+            FolderTarget::Models => self.settings.models_dir = value.clone(),
+            FolderTarget::Output => self.settings.output_dir = value.clone(),
+        }
+        self.status = format!("Выбрана папка: {value}");
+        self.log = format!("{title}: {value}");
     }
 
     /// Запускает скачивание модели в фоне.
@@ -479,29 +513,16 @@ impl ScreenRecorderApp {
                 }
 
                 ui.add_space(6.0);
-                Self::section(ui, "Распознавание", |ui| {
+                let mut pick_models = false;
+                let mut pick_output = false;
+                let mut save_clicked = false;
+                let mut check_clicked = false;
+
+                Self::section(ui, "Параметры", |ui| {
                     egui::Grid::new("settings_grid")
                         .num_columns(2)
                         .spacing([8.0, 6.0])
                         .show(ui, |ui| {
-                            ui.label("Транскрипция:");
-                            Self::combo(
-                                ui,
-                                "transcription_engine",
-                                &mut self.settings.transcription.engine,
-                                &["whisper-rs"],
-                            );
-                            ui.end_row();
-
-                            ui.label("Спикеры:");
-                            Self::combo(
-                                ui,
-                                "diarization_engine",
-                                &mut self.settings.diarization.engine,
-                                &["sherpa-onnx", "none"],
-                            );
-                            ui.end_row();
-
                             ui.label("Устройство:");
                             Self::combo(
                                 ui,
@@ -535,18 +556,30 @@ impl ScreenRecorderApp {
                 ui.add_space(6.0);
                 Self::section(ui, "Папки", |ui| {
                     ui.label("Папка моделей:");
-                    ui.add_sized(
-                        [ui.available_width(), 26.0],
-                        egui::TextEdit::singleline(&mut self.settings.models_dir)
-                            .hint_text("по умолчанию"),
-                    );
+                    ui.horizontal(|ui| {
+                        let width = (ui.available_width() - 96.0).max(120.0);
+                        ui.add_sized(
+                            [width, 26.0],
+                            egui::TextEdit::singleline(&mut self.settings.models_dir)
+                                .hint_text("по умолчанию"),
+                        );
+                        if ui.button("Обзор...").clicked() {
+                            pick_models = true;
+                        }
+                    });
                     ui.add_space(4.0);
                     ui.label("Папка результатов:");
-                    ui.add_sized(
-                        [ui.available_width(), 26.0],
-                        egui::TextEdit::singleline(&mut self.settings.output_dir)
-                            .hint_text("по умолчанию"),
-                    );
+                    ui.horizontal(|ui| {
+                        let width = (ui.available_width() - 96.0).max(120.0);
+                        ui.add_sized(
+                            [width, 26.0],
+                            egui::TextEdit::singleline(&mut self.settings.output_dir)
+                                .hint_text("по умолчанию"),
+                        );
+                        if ui.button("Обзор...").clicked() {
+                            pick_output = true;
+                        }
+                    });
                     ui.add_space(4.0);
                     ui.label(
                         RichText::new(format!("Файл: {}", self.paths.settings_path().display()))
@@ -556,18 +589,34 @@ impl ScreenRecorderApp {
                 });
 
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Сохранить настройки").clicked() {
-                        let store = SettingsStore::new(self.paths.settings_path());
-                        self.status = match store.save(&self.settings) {
-                            Ok(()) => "Настройки сохранены".to_string(),
-                            Err(error) => format!("Ошибка сохранения: {error}"),
-                        };
+                ui.columns(2, |columns| {
+                    if columns[0].button("Сохранить настройки").clicked() {
+                        save_clicked = true;
                     }
-                    if ui.button("Проверить систему").clicked() {
-                        self.status = self.diagnostics();
-                    }
+                    columns[1].with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Проверить систему").clicked() {
+                            check_clicked = true;
+                        }
+                    });
                 });
+
+                if pick_models {
+                    self.pick_folder(FolderTarget::Models);
+                }
+                if pick_output {
+                    self.pick_folder(FolderTarget::Output);
+                }
+                if save_clicked {
+                    let store = SettingsStore::new(self.paths.settings_path());
+                    self.status = match store.save(&self.settings) {
+                        Ok(()) => "Настройки сохранены".to_string(),
+                        Err(error) => format!("Ошибка сохранения: {error}"),
+                    };
+                }
+                if check_clicked {
+                    self.status = self.diagnostics();
+                }
+
                 ui.add_space(6.0);
                 ui.label(RichText::new(&self.status).color(HINT));
             });

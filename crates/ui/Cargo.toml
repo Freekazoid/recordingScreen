@@ -11,4 +11,5 @@ screenrecorder-application = { path = "../application" }
 screenrecorder-domain = { path = "../domain" }
 eframe.workspace = true
 egui_extras = { version = "0.37", features = ["image"] }
+rfd.workspace = true
 serde_json.workspace = true
