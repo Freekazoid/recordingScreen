@@ -331,8 +331,6 @@ impl ScreenRecorderApp {
                     .arg(&out)
                     .status()
                     .map_err(|error| format!("окно выбора: {error}"))?;
-                let _ = std::fs::remove_file(&image);
-                let _ = std::fs::remove_file(image.with_extension("gst.log"));
                 if !status.success() {
                     return Err(format!("выбор области завершился: {status}"));
                 }
@@ -340,9 +338,11 @@ impl ScreenRecorderApp {
                     Ok(text) => text,
                     Err(_) => return Err("область не выбрана".to_string()),
                 };
-                let _ = std::fs::remove_file(&out);
                 parse_region(&text)
             })();
+            let _ = std::fs::remove_file(&image);
+            let _ = std::fs::remove_file(image.with_extension("gst.log"));
+            let _ = std::fs::remove_file(&out);
             let _ = sender.send(result);
         });
         self.area_rx = Some(receiver);
