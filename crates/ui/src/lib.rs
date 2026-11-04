@@ -329,11 +329,31 @@ impl ScreenRecorderApp {
         let modifier = Modifiers::CONTROL | Modifiers::SHIFT;
         let accelerator = |code| Some(Accelerator::new(modifier, code));
         let status = MenuItem::new("Статус: готово", false, None);
-        let full = MenuItem::new("Весь экран", true, accelerator(Code::Digit1));
-        let area = MenuItem::new("Область экрана", true, accelerator(Code::Digit2));
-        let program = MenuItem::new("Программа", true, accelerator(Code::Digit3));
-        let audio = MenuItem::new("Только аудио", true, accelerator(Code::Digit4));
-        let stop = MenuItem::new("Остановить запись", false, accelerator(Code::Digit5));
+        let full = MenuItem::new(
+            tray_label("Весь экран", "Ctrl+Shift+1"),
+            true,
+            accelerator(Code::Digit1),
+        );
+        let area = MenuItem::new(
+            tray_label("Область экрана", "Ctrl+Shift+2"),
+            true,
+            accelerator(Code::Digit2),
+        );
+        let program = MenuItem::new(
+            tray_label("Программа", "Ctrl+Shift+3"),
+            true,
+            accelerator(Code::Digit3),
+        );
+        let audio = MenuItem::new(
+            tray_label("Только аудио", "Ctrl+Shift+4"),
+            true,
+            accelerator(Code::Digit4),
+        );
+        let stop = MenuItem::new(
+            tray_label("Остановить запись", "Ctrl+Shift+5"),
+            false,
+            accelerator(Code::Digit5),
+        );
         let show = MenuItem::new("Показать", true, None);
         let quit = MenuItem::new("Выход", true, None);
 
@@ -3259,6 +3279,23 @@ impl eframe::App for ScreenRecorderApp {
             });
         self.window_picker(ui.ctx());
         self.delete_window(ui.ctx());
+    }
+}
+
+/// Формирует подпись пункта меню трея.
+///
+/// На Linux StatusNotifier не показывает отдельный столбец сочетаний,
+/// поэтому клавиши добавляются в текст с выравниванием по ширине.
+/// На Windows/macOS сочетание рисует сама система через `Accelerator`.
+fn tray_label(text: &str, keys: &str) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        format!("{text:<24}{keys}")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = keys;
+        text.to_string()
     }
 }
 
