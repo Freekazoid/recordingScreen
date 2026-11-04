@@ -17,9 +17,10 @@ use screenrecorder_adapters::{
     recover_all_segments, take_screenshot,
 };
 use screenrecorder_application::{
-    DiarizeWorker, HistoryStore, ManifestState, MlWorker, Rect, SessionManifest, SessionRecord,
-    Settings, SettingsStore, TrackManifest, Transcript, append_session_log, assign_speakers,
-    display_date, import_manifests, load_manifest, recover_incomplete, save_manifest,
+    DiarizeWorker, HistoryStore, JobRecord, ManifestState, MlWorker, Rect, SessionManifest,
+    SessionRecord, Settings, SettingsStore, TrackManifest, Transcript, append_session_log,
+    assign_speakers, display_date, import_manifests, load_manifest, recover_incomplete,
+    save_manifest,
 };
 use screenrecorder_domain::{SessionId, TrackKind, TrackStats, TrackStatus};
 use std::path::{Path, PathBuf};
@@ -133,6 +134,8 @@ pub struct ScreenRecorderApp {
     transcribing: bool,
     history: HistoryStore,
     history_records: Vec<SessionRecord>,
+    export_job: Option<JobRecord>,
+    transcription_job: Option<JobRecord>,
 }
 
 impl ScreenRecorderApp {
@@ -165,6 +168,11 @@ impl ScreenRecorderApp {
             && imported > 0
         {
             log = format!("{log} В истории записей: {imported}.");
+        }
+        if let Ok(recovered_jobs) = history.recover_jobs()
+            && recovered_jobs > 0
+        {
+            log = format!("{log} Задач возвращено в очередь: {recovered_jobs}.");
         }
         let history_records = history.list(100).unwrap_or_default();
         Self {
@@ -212,6 +220,37 @@ impl ScreenRecorderApp {
             transcribing: false,
             history,
             history_records,
+            export_job: None,
+            transcription_job: None,
+        }
+    }
+
+    /// Создаёт задачу обработки и сохраняет её как выполняющуюся.
+    fn begin_job(&mut self, session_dir: &Path, kind: &str) -> Option<JobRecord> {
+        let session_id = session_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("session")
+            .to_string();
+        let mut job = JobRecord::new(session_id, kind);
+        job.start();
+        if let Err(error) = self.history.upsert_job(&job) {
+            self.log = format!("История задач: {error}");
+        }
+        Some(job)
+    }
+
+    /// Завершает задачу и сохраняет её статус.
+    fn finish_job(&mut self, job: Option<JobRecord>, result: Result<(), String>) {
+        let Some(mut job) = job else {
+            return;
+        };
+        match result {
+            Ok(()) => job.succeed(),
+            Err(error) => job.fail(error),
+        }
+        if let Err(error) = self.history.upsert_job(&job) {
+            self.log = format!("История задач: {error}");
         }
     }
 
@@ -1214,6 +1253,7 @@ impl ScreenRecorderApp {
         });
         self.transcript_rx = Some(receiver);
         self.transcribing = true;
+        self.transcription_job = self.begin_job(session_dir, "transcribe");
         self.status = "Распознавание речи…".to_string();
     }
 
@@ -1234,6 +1274,9 @@ impl ScreenRecorderApp {
         };
         self.transcript_rx = None;
         self.transcribing = false;
+        let job_result = result.as_ref().map(|_| ()).map_err(|error| error.clone());
+        let job = self.transcription_job.take();
+        self.finish_job(job, job_result);
         match result {
             Ok(output) => {
                 self.status = "Транскрипция готова".to_string();
@@ -1272,11 +1315,18 @@ impl ScreenRecorderApp {
 
     /// Запускает экспорт записи в выбранный формат в фоне.
     fn start_export(&mut self, session_dir: &Path, audio_only: bool) {
-        if audio_only {
-            self.start_audio_export(session_dir);
+        if self.exporting {
             return;
         }
-        if self.exporting {
+        let system = session_dir.join("system.wav");
+        let mic = session_dir.join("mic.wav");
+        if audio_only {
+            if !system.exists() && !mic.exists() {
+                self.log = "Экспорт аудио пропущен: нет дорожек.".to_string();
+                return;
+            }
+            self.export_job = self.begin_job(session_dir, "export");
+            self.start_audio_export(session_dir);
             return;
         }
         let video = session_dir.join("screen.mkv");
@@ -1284,8 +1334,7 @@ impl ScreenRecorderApp {
             self.log = "Экспорт пропущен: нет видеофайла.".to_string();
             return;
         }
-        let system = session_dir.join("system.wav");
-        let mic = session_dir.join("mic.wav");
+        self.export_job = self.begin_job(session_dir, "export");
         let output_dir = if self.settings.output_dir.trim().is_empty() {
             self.paths.default_output_dir.clone()
         } else {
@@ -1367,6 +1416,9 @@ impl ScreenRecorderApp {
         };
         self.export_rx = None;
         self.exporting = false;
+        let job_result = result.as_ref().map(|_| ()).map_err(|error| error.clone());
+        let job = self.export_job.take();
+        self.finish_job(job, job_result);
         match result {
             Ok(path) => {
                 self.status = "Экспорт завершён".to_string();

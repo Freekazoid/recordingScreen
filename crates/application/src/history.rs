@@ -5,7 +5,7 @@
 //! поэтому уже существующие записи не теряются.
 
 use crate::manifest::{ManifestState, SessionManifest, load_manifest};
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -77,6 +77,56 @@ impl SessionRecord {
     }
 }
 
+/// Запись задачи обработки.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobRecord {
+    pub id: String,
+    pub session_id: String,
+    pub kind: String,
+    pub state: String,
+    pub attempts: u32,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl JobRecord {
+    /// Создаёт задачу в очереди.
+    pub fn new(session_id: impl Into<String>, kind: impl Into<String>) -> Self {
+        let now = Utc::now().to_rfc3339();
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: session_id.into(),
+            kind: kind.into(),
+            state: "queued".to_string(),
+            attempts: 0,
+            last_error: None,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    /// Переводит задачу в выполнение.
+    pub fn start(&mut self) {
+        self.state = "running".to_string();
+        self.attempts += 1;
+        self.updated_at = Utc::now().to_rfc3339();
+    }
+
+    /// Завершает задачу успешно.
+    pub fn succeed(&mut self) {
+        self.state = "succeeded".to_string();
+        self.updated_at = Utc::now().to_rfc3339();
+    }
+
+    /// Завершает задачу ошибкой.
+    pub fn fail(&mut self, error: impl Into<String>) {
+        self.state = "failed".to_string();
+        self.last_error = Some(error.into());
+        self.updated_at = Utc::now().to_rfc3339();
+    }
+}
+
 /// Хранилище истории.
 #[derive(Debug, Clone)]
 pub struct HistoryStore {
@@ -109,7 +159,19 @@ impl HistoryStore {
                     error TEXT
                 );
                 CREATE INDEX IF NOT EXISTS sessions_created_idx
-                    ON sessions(created_at DESC);",
+                    ON sessions(created_at DESC);
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    attempts INTEGER NOT NULL,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS jobs_session_idx
+                    ON jobs(session_id, created_at DESC);",
             )
             .map_err(|source| self.sqlite(source))?;
         Ok(())
@@ -184,6 +246,76 @@ impl HistoryStore {
             records.push(row.map_err(|source| self.sqlite(source))?);
         }
         Ok(records)
+    }
+
+    /// Добавляет или обновляет задачу.
+    pub fn upsert_job(&self, job: &JobRecord) -> Result<(), HistoryError> {
+        let connection = self.connection()?;
+        connection
+            .execute(
+                "INSERT INTO jobs (
+                    id, session_id, kind, state, attempts, last_error, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ON CONFLICT(id) DO UPDATE SET
+                    state = excluded.state,
+                    attempts = excluded.attempts,
+                    last_error = excluded.last_error,
+                    updated_at = excluded.updated_at",
+                params![
+                    job.id,
+                    job.session_id,
+                    job.kind,
+                    job.state,
+                    job.attempts,
+                    job.last_error,
+                    job.created_at,
+                    job.updated_at,
+                ],
+            )
+            .map_err(|source| self.sqlite(source))?;
+        Ok(())
+    }
+
+    /// Возвращает задачи сессии.
+    pub fn list_jobs(&self, session_id: &str) -> Result<Vec<JobRecord>, HistoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, session_id, kind, state, attempts, last_error, created_at, updated_at
+                 FROM jobs WHERE session_id = ?1 ORDER BY created_at",
+            )
+            .map_err(|source| self.sqlite(source))?;
+        let rows = statement
+            .query_map([session_id], |row| {
+                Ok(JobRecord {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    state: row.get(3)?,
+                    attempts: row.get(4)?,
+                    last_error: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })
+            .map_err(|source| self.sqlite(source))?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row.map_err(|source| self.sqlite(source))?);
+        }
+        Ok(records)
+    }
+
+    /// Возвращает выполнявшиеся задачи в очередь после перезапуска.
+    pub fn recover_jobs(&self) -> Result<usize, HistoryError> {
+        let connection = self.connection()?;
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "UPDATE jobs SET state = 'queued', updated_at = ?1 WHERE state = 'running'",
+                [now],
+            )
+            .map_err(|source| self.sqlite(source))
     }
 
     /// Открывает соединение и создаёт каталог при необходимости.
@@ -305,5 +437,23 @@ mod tests {
         let imported = import_manifests(&store, dir.path()).expect("import");
         assert_eq!(imported, 1);
         assert_eq!(store.list(10).expect("list")[0].id, "s2");
+    }
+
+    /// Проверяет задачи и их восстановление после перезапуска.
+    #[test]
+    fn stores_and_recovers_jobs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = HistoryStore::new(dir.path().join("history.sqlite3"));
+        store.init().expect("init");
+        let mut job = JobRecord::new("s1", "export");
+        store.upsert_job(&job).expect("queued");
+        job.start();
+        store.upsert_job(&job).expect("running");
+        assert_eq!(store.recover_jobs().expect("recover"), 1);
+        let jobs = store.list_jobs("s1").expect("jobs");
+        assert_eq!(jobs[0].state, "queued");
+        job.succeed();
+        store.upsert_job(&job).expect("succeeded");
+        assert_eq!(store.list_jobs("s1").expect("jobs")[0].state, "succeeded");
     }
 }
