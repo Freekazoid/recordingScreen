@@ -9,11 +9,13 @@ use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke,
     TextStyle, Vec2,
 };
-use screenrecorder_adapters::{DownloadProgress, ModelManager, Paths, X11VideoRecorder};
+use screenrecorder_adapters::{
+    DownloadProgress, LinuxAudioRecorder, ModelManager, Paths, X11VideoRecorder,
+};
 use screenrecorder_application::{Settings, SettingsStore};
 use screenrecorder_domain::SessionId;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 /// События фоновой загрузки модели.
 enum DownloadEvent {
@@ -58,12 +60,16 @@ pub struct ScreenRecorderApp {
     video_quality: String,
     audio_track_mode: String,
     recorder: X11VideoRecorder,
+    audio_recorder: LinuxAudioRecorder,
     recording: bool,
     session_dir: Option<PathBuf>,
     model_manager: ModelManager,
     download_rx: Option<Receiver<DownloadEvent>>,
     download_model: Option<&'static str>,
     download_progress: f32,
+    folder_rx: Option<Receiver<Option<PathBuf>>>,
+    folder_target: Option<FolderTarget>,
+    settings_dirty: bool,
 }
 
 impl ScreenRecorderApp {
@@ -80,17 +86,25 @@ impl ScreenRecorderApp {
             video_quality: "Хорошее (CRF 23)".to_string(),
             audio_track_mode: "Как есть (без пережатия)".to_string(),
             recorder: X11VideoRecorder::new(),
+            audio_recorder: LinuxAudioRecorder::new(),
             recording: false,
             session_dir: None,
             model_manager,
             download_rx: None,
             download_model: None,
             download_progress: 0.0,
+            folder_rx: None,
+            folder_target: None,
+            settings_dirty: false,
         }
     }
 
     /// Открывает нативный диалог выбора каталога.
     fn pick_folder(&mut self, target: FolderTarget) {
+        if self.folder_rx.is_some() {
+            self.log = "Диалог выбора каталога уже открыт.".to_string();
+            return;
+        }
         let (title, current) = match target {
             FolderTarget::Models => ("Папка моделей", &self.settings.models_dir),
             FolderTarget::Output => ("Папка результатов", &self.settings.output_dir),
@@ -100,20 +114,65 @@ impl ScreenRecorderApp {
         } else {
             PathBuf::from(current)
         };
-        let Some(path) = rfd::FileDialog::new()
-            .set_title(title)
-            .set_directory(start)
-            .pick_folder()
-        else {
+        let title = title.to_string();
+        let (sender, receiver) = mpsc::channel();
+        let dialog_title = title.clone();
+        std::thread::spawn(move || {
+            // Диалог нельзя вызывать в UI-потоке: на Wayland портал блокирует
+            // обработку событий приложения.
+            let result = rfd::FileDialog::new()
+                .set_title(dialog_title)
+                .set_directory(start)
+                .pick_folder();
+            let _ = sender.send(result);
+        });
+        self.folder_rx = Some(receiver);
+        self.folder_target = Some(target);
+        self.log = format!("{title}: ожидание выбора…");
+    }
+
+    /// Забирает результат фонового выбора каталога.
+    fn poll_folder_picker(&mut self) {
+        let Some(receiver) = &self.folder_rx else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Some(None),
+        };
+        self.folder_rx = None;
+        let Some(target) = self.folder_target.take() else {
+            return;
+        };
+        let Some(Some(path)) = result else {
+            self.log = "Выбор каталога отменён.".to_string();
             return;
         };
         let value = path.to_string_lossy().to_string();
+        let title = match target {
+            FolderTarget::Models => "Папка моделей",
+            FolderTarget::Output => "Папка результатов",
+        };
         match target {
             FolderTarget::Models => self.settings.models_dir = value.clone(),
             FolderTarget::Output => self.settings.output_dir = value.clone(),
         }
-        self.status = format!("Выбрана папка: {value}");
+        self.settings_dirty = true;
         self.log = format!("{title}: {value}");
+    }
+
+    /// Сохраняет настройки, если пользователь что-то изменил.
+    fn persist_settings(&mut self) {
+        if !self.settings_dirty {
+            return;
+        }
+        let store = SettingsStore::new(self.paths.settings_path());
+        match store.save(&self.settings) {
+            Ok(()) => self.log = "Настройки сохранены автоматически.".to_string(),
+            Err(error) => self.status = format!("Ошибка сохранения: {error}"),
+        }
+        self.settings_dirty = false;
     }
 
     /// Запускает скачивание модели в фоне.
@@ -197,10 +256,29 @@ impl ScreenRecorderApp {
         let output = session_dir.join("screen.mkv");
         match self.recorder.start(&output, self.settings.capture.fps) {
             Ok(()) => {
+                match self.audio_recorder.start(&session_dir) {
+                    Ok(audio) => {
+                        if !audio.warnings.is_empty() {
+                            self.log = format!(
+                                "Видео пишется, но звук неполный: {}",
+                                audio.warnings.join("; ")
+                            );
+                        } else if audio.system && audio.mic {
+                            self.log = format!(
+                                "Запись: видео + system.wav + mic.wav ({})",
+                                session_dir.display()
+                            );
+                        } else {
+                            self.log = "Запись: доступна только часть аудиодорожек".to_string();
+                        }
+                    }
+                    Err(error) => {
+                        self.log = format!("Видео пишется без звука: {error}");
+                    }
+                }
                 self.recording = true;
                 self.session_dir = Some(session_dir);
                 self.status = format!("Идёт запись: {mode}");
-                self.log = format!("Запись начата: {}", output.display());
             }
             Err(error) => {
                 self.status = format!("Ошибка записи: {error}");
@@ -215,29 +293,31 @@ impl ScreenRecorderApp {
             return;
         }
         self.recording = false;
-        match self.recorder.stop() {
-            Ok(()) => {
-                let path = self
-                    .session_dir
-                    .as_ref()
-                    .map(|dir| dir.join("screen.mkv").display().to_string())
-                    .unwrap_or_else(|| "screen.mkv".to_string());
+        let audio_result = self.audio_recorder.stop();
+        let video_result = self.recorder.stop();
+        let dir = self
+            .session_dir
+            .as_ref()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_else(|| "каталог сессии".to_string());
+        match (video_result, audio_result) {
+            (Ok(()), Ok(())) => {
                 self.status = "Запись остановлена".to_string();
-                self.log = format!("Запись сохранена: {path}");
+                self.log = format!("Запись сохранена: {dir}");
             }
-            Err(error) => {
-                self.status = format!("Ошибка остановки: {error}");
-                self.log = format!("Не удалось остановить запись: {error}");
+            (video, audio) => {
+                self.status = "Запись остановлена с ошибками".to_string();
+                self.log = format!("Остановка: видео={video:?}, звук={audio:?}");
             }
         }
     }
 
-    /// Проверяет, не завершился ли ffmpeg сам.
+    /// Проверяет, не завершились ли процессы записи сами.
     fn poll_recording(&mut self) {
-        if self.recording && !self.recorder.is_running() {
+        if self.recording && !self.recorder.is_running() && !self.audio_recorder.is_running() {
             self.recording = false;
             self.status = "Запись завершена".to_string();
-            self.log = "ffmpeg завершился. Проверьте файл записи.".to_string();
+            self.log = "Запись завершилась. Проверьте файлы сессии.".to_string();
         }
     }
 
@@ -314,15 +394,22 @@ impl ScreenRecorderApp {
     }
 
     /// Рисует выпадающий список.
-    fn combo(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[&str]) {
+    fn combo(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[&str]) -> bool {
+        let mut changed = false;
         egui::ComboBox::from_id_salt(id)
             .width(210.0)
             .selected_text(value.clone())
             .show_ui(ui, |ui| {
                 for option in options {
-                    ui.selectable_value(value, option.to_string(), *option);
+                    if ui
+                        .selectable_value(value, option.to_string(), *option)
+                        .clicked()
+                    {
+                        changed = true;
+                    }
                 }
             });
+        changed
     }
 
     /// Рисует строку модели в настройках.
@@ -515,8 +602,6 @@ impl ScreenRecorderApp {
                 ui.add_space(6.0);
                 let mut pick_models = false;
                 let mut pick_output = false;
-                let mut save_clicked = false;
-                let mut check_clicked = false;
 
                 Self::section(ui, "Параметры", |ui| {
                     egui::Grid::new("settings_grid")
@@ -524,33 +609,47 @@ impl ScreenRecorderApp {
                         .spacing([8.0, 6.0])
                         .show(ui, |ui| {
                             ui.label("Устройство:");
-                            Self::combo(
+                            if Self::combo(
                                 ui,
                                 "compute_device",
                                 &mut self.settings.transcription.compute_device,
                                 &["auto", "cpu", "gpu"],
-                            );
+                            ) {
+                                self.settings_dirty = true;
+                            }
                             ui.end_row();
 
                             ui.label("Язык:");
-                            Self::combo(
+                            if Self::combo(
                                 ui,
                                 "language",
                                 &mut self.settings.transcription.language,
                                 &["auto", "ru", "en"],
-                            );
+                            ) {
+                                self.settings_dirty = true;
+                            }
                             ui.end_row();
                         });
 
                     ui.add_space(4.0);
-                    ui.checkbox(
-                        &mut self.settings.transcription.enabled,
-                        "Включить транскрипцию",
-                    );
-                    ui.checkbox(
-                        &mut self.settings.diarization.enabled,
-                        "Включить диаризацию",
-                    );
+                    if ui
+                        .checkbox(
+                            &mut self.settings.transcription.enabled,
+                            "Включить транскрипцию",
+                        )
+                        .changed()
+                    {
+                        self.settings_dirty = true;
+                    }
+                    if ui
+                        .checkbox(
+                            &mut self.settings.diarization.enabled,
+                            "Включить диаризацию",
+                        )
+                        .changed()
+                    {
+                        self.settings_dirty = true;
+                    }
                 });
 
                 ui.add_space(6.0);
@@ -558,11 +657,16 @@ impl ScreenRecorderApp {
                     ui.label("Папка моделей:");
                     ui.horizontal(|ui| {
                         let width = (ui.available_width() - 96.0).max(120.0);
-                        ui.add_sized(
-                            [width, 26.0],
-                            egui::TextEdit::singleline(&mut self.settings.models_dir)
-                                .hint_text("по умолчанию"),
-                        );
+                        if ui
+                            .add_sized(
+                                [width, 26.0],
+                                egui::TextEdit::singleline(&mut self.settings.models_dir)
+                                    .hint_text("по умолчанию"),
+                            )
+                            .changed()
+                        {
+                            self.settings_dirty = true;
+                        }
                         if ui.button("Обзор...").clicked() {
                             pick_models = true;
                         }
@@ -571,11 +675,16 @@ impl ScreenRecorderApp {
                     ui.label("Папка результатов:");
                     ui.horizontal(|ui| {
                         let width = (ui.available_width() - 96.0).max(120.0);
-                        ui.add_sized(
-                            [width, 26.0],
-                            egui::TextEdit::singleline(&mut self.settings.output_dir)
-                                .hint_text("по умолчанию"),
-                        );
+                        if ui
+                            .add_sized(
+                                [width, 26.0],
+                                egui::TextEdit::singleline(&mut self.settings.output_dir)
+                                    .hint_text("по умолчанию"),
+                            )
+                            .changed()
+                        {
+                            self.settings_dirty = true;
+                        }
                         if ui.button("Обзор...").clicked() {
                             pick_output = true;
                         }
@@ -588,37 +697,19 @@ impl ScreenRecorderApp {
                     );
                 });
 
-                ui.add_space(8.0);
-                ui.columns(2, |columns| {
-                    if columns[0].button("Сохранить настройки").clicked() {
-                        save_clicked = true;
-                    }
-                    columns[1].with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Проверить систему").clicked() {
-                            check_clicked = true;
-                        }
-                    });
-                });
-
                 if pick_models {
                     self.pick_folder(FolderTarget::Models);
                 }
                 if pick_output {
                     self.pick_folder(FolderTarget::Output);
                 }
-                if save_clicked {
-                    let store = SettingsStore::new(self.paths.settings_path());
-                    self.status = match store.save(&self.settings) {
-                        Ok(()) => "Настройки сохранены".to_string(),
-                        Err(error) => format!("Ошибка сохранения: {error}"),
-                    };
-                }
-                if check_clicked {
-                    self.status = self.diagnostics();
-                }
 
                 ui.add_space(6.0);
-                ui.label(RichText::new(&self.status).color(HINT));
+                ui.label(
+                    RichText::new("Изменения сохраняются автоматически")
+                        .size(11.0)
+                        .color(HINT),
+                );
             });
     }
 
@@ -660,25 +751,6 @@ impl ScreenRecorderApp {
             );
         });
     }
-
-    /// Проверяет пути и возвращает текстовый отчёт.
-    fn diagnostics(&self) -> String {
-        let check = |path: &std::path::Path| {
-            self.paths
-                .ensure_writable(path)
-                .map(|_| "доступен".to_string())
-                .unwrap_or_else(|error| format!("ошибка: {error}"))
-        };
-        format!(
-            "Data: {} ({})\nConfig: {} ({})\nOutput: {} ({})",
-            self.paths.data_dir.display(),
-            check(&self.paths.data_dir),
-            self.paths.config_dir.display(),
-            check(&self.paths.config_dir),
-            self.paths.default_output_dir.display(),
-            check(&self.paths.default_output_dir),
-        )
-    }
 }
 
 impl eframe::App for ScreenRecorderApp {
@@ -686,6 +758,7 @@ impl eframe::App for ScreenRecorderApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_recording();
         self.poll_download();
+        self.poll_folder_picker();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BG).inner_margin(Margin::same(5)))
             .show(ui, |ui| {
@@ -697,6 +770,7 @@ impl eframe::App for ScreenRecorderApp {
                     Screen::About => self.draw_about(ui),
                 }
             });
+        self.persist_settings();
     }
 }
 
