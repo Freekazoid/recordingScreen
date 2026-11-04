@@ -46,6 +46,14 @@ struct TranscriptOutput {
     warning: Option<String>,
 }
 
+/// Открытый в редакторе транскрипт.
+struct TranscriptView {
+    path: PathBuf,
+    title: String,
+    text: String,
+    dirty: bool,
+}
+
 /// Каталог, который выбирает пользователь.
 #[derive(Debug, Clone, Copy)]
 enum FolderTarget {
@@ -138,6 +146,7 @@ pub struct ScreenRecorderApp {
     export_job: Option<JobRecord>,
     transcription_job: Option<JobRecord>,
     queued_jobs: Vec<JobRecord>,
+    transcript_view: Option<TranscriptView>,
 }
 
 impl ScreenRecorderApp {
@@ -227,6 +236,7 @@ impl ScreenRecorderApp {
             export_job: None,
             transcription_job: None,
             queued_jobs,
+            transcript_view: None,
         }
     }
 
@@ -1869,6 +1879,76 @@ impl ScreenRecorderApp {
         clicked
     }
 
+    /// Открывает транскрипт во встроенном редакторе.
+    fn open_transcript(&mut self, path: String) {
+        let path = PathBuf::from(path);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let title = path
+                    .parent()
+                    .and_then(|dir| dir.file_name())
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "транскрипт".to_string());
+                self.transcript_view = Some(TranscriptView {
+                    path,
+                    title,
+                    text,
+                    dirty: false,
+                });
+            }
+            Err(error) => {
+                self.log = format!("Не удалось открыть транскрипт: {error}");
+            }
+        }
+    }
+
+    /// Рисует окно редактирования транскрипта.
+    fn transcript_window(&mut self, ctx: &egui::Context) {
+        let Some(mut view) = self.transcript_view.take() else {
+            return;
+        };
+        let mut save = false;
+        let mut close = false;
+        egui::Window::new(format!("Транскрипт · {}", view.title))
+            .default_size([620.0, 480.0])
+            .resizable(true)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let response = ui.add(
+                            egui::TextEdit::multiline(&mut view.text)
+                                .code_editor()
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(24),
+                        );
+                        if response.changed() {
+                            view.dirty = true;
+                        }
+                    });
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(view.dirty, egui::Button::new("Сохранить"))
+                        .clicked()
+                    {
+                        save = true;
+                    }
+                    if ui.button("Закрыть").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if save {
+            match std::fs::write(&view.path, &view.text) {
+                Ok(()) => view.dirty = false,
+                Err(error) => self.log = format!("Не удалось сохранить транскрипт: {error}"),
+            }
+        }
+        if !close {
+            self.transcript_view = Some(view);
+        }
+    }
+
     /// Показывает список X11-окон для выбора «Программа».
     fn window_picker(&mut self, ctx: &egui::Context) {
         if !self.show_windows {
@@ -2107,6 +2187,11 @@ impl ScreenRecorderApp {
                                 && ui.button("Открыть текст").clicked()
                             {
                                 open_path(transcript);
+                            }
+                            if let Some(transcript) = &record.transcript_path
+                                && ui.button("Редактировать").clicked()
+                            {
+                                self.open_transcript(transcript.clone());
                             }
                             if ui.button("Открыть папку").clicked() {
                                 open_path(&record.output_dir);
@@ -2399,6 +2484,7 @@ impl eframe::App for ScreenRecorderApp {
                 }
             });
         self.window_picker(ui.ctx());
+        self.transcript_window(ui.ctx());
         self.persist_settings();
     }
 }
