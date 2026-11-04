@@ -46,14 +46,6 @@ struct TranscriptOutput {
     warning: Option<String>,
 }
 
-/// Открытый в редакторе транскрипт.
-struct TranscriptView {
-    path: PathBuf,
-    title: String,
-    text: String,
-    dirty: bool,
-}
-
 /// Каталог, который выбирает пользователь.
 #[derive(Debug, Clone, Copy)]
 enum FolderTarget {
@@ -114,6 +106,7 @@ pub struct ScreenRecorderApp {
     audio_recorder: LinuxAudioRecorder,
     recording: bool,
     session_dir: Option<PathBuf>,
+    last_export_path: Option<PathBuf>,
     model_manager: ModelManager,
     download_rx: Option<Receiver<DownloadEvent>>,
     download_model: Option<&'static str>,
@@ -146,7 +139,7 @@ pub struct ScreenRecorderApp {
     export_job: Option<JobRecord>,
     transcription_job: Option<JobRecord>,
     queued_jobs: Vec<JobRecord>,
-    transcript_view: Option<TranscriptView>,
+    delete_confirm: Option<SessionRecord>,
 }
 
 impl ScreenRecorderApp {
@@ -209,6 +202,7 @@ impl ScreenRecorderApp {
             audio_recorder: LinuxAudioRecorder::new(),
             recording: false,
             session_dir: None,
+            last_export_path: None,
             model_manager,
             download_rx: None,
             download_model: None,
@@ -241,7 +235,7 @@ impl ScreenRecorderApp {
             export_job: None,
             transcription_job: None,
             queued_jobs,
-            transcript_view: None,
+            delete_confirm: None,
         }
     }
 
@@ -1422,6 +1416,7 @@ impl ScreenRecorderApp {
                     output.language,
                     output
                         .warning
+                        .as_deref()
                         .map(|warning| format!(" · {warning}"))
                         .unwrap_or_default()
                 );
@@ -1435,6 +1430,30 @@ impl ScreenRecorderApp {
                         &format!("транскрипт: {}", output.text_path.display()),
                     );
                     self.sync_history(&dir);
+                }
+                let video = self.last_export_path.clone().or_else(|| {
+                    self.session_dir
+                        .as_ref()
+                        .and_then(|dir| load_manifest(dir).ok())
+                        .and_then(|manifest| manifest.export_path.map(PathBuf::from))
+                });
+                if let Some(video) = video {
+                    match copy_transcripts_next_to_video(&video, &output) {
+                        Ok(paths) => {
+                            self.log = format!(
+                                "{} · рядом с видео: {}",
+                                self.log,
+                                paths
+                                    .iter()
+                                    .map(|path| path.display().to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            );
+                        }
+                        Err(error) => {
+                            self.log = format!("{} · копирование к видео: {error}", self.log);
+                        }
+                    }
                 }
             }
             Err(error) => {
@@ -1554,6 +1573,7 @@ impl ScreenRecorderApp {
             Ok(path) => {
                 self.status = "Экспорт завершён".to_string();
                 self.log = format!("Готово: {}", path.display());
+                self.last_export_path = Some(path.clone());
                 if let Some(dir) = self.session_dir.clone()
                     && let Ok(mut manifest) = load_manifest(&dir)
                 {
@@ -1897,76 +1917,6 @@ impl ScreenRecorderApp {
         clicked
     }
 
-    /// Открывает транскрипт во встроенном редакторе.
-    fn open_transcript(&mut self, path: String) {
-        let path = PathBuf::from(path);
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let title = path
-                    .parent()
-                    .and_then(|dir| dir.file_name())
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "транскрипт".to_string());
-                self.transcript_view = Some(TranscriptView {
-                    path,
-                    title,
-                    text,
-                    dirty: false,
-                });
-            }
-            Err(error) => {
-                self.log = format!("Не удалось открыть транскрипт: {error}");
-            }
-        }
-    }
-
-    /// Рисует окно редактирования транскрипта.
-    fn transcript_window(&mut self, ctx: &egui::Context) {
-        let Some(mut view) = self.transcript_view.take() else {
-            return;
-        };
-        let mut save = false;
-        let mut close = false;
-        egui::Window::new(format!("Транскрипт · {}", view.title))
-            .default_size([620.0, 480.0])
-            .resizable(true)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let response = ui.add(
-                            egui::TextEdit::multiline(&mut view.text)
-                                .code_editor()
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(24),
-                        );
-                        if response.changed() {
-                            view.dirty = true;
-                        }
-                    });
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(view.dirty, egui::Button::new("Сохранить"))
-                        .clicked()
-                    {
-                        save = true;
-                    }
-                    if ui.button("Закрыть").clicked() {
-                        close = true;
-                    }
-                });
-            });
-        if save {
-            match std::fs::write(&view.path, &view.text) {
-                Ok(()) => view.dirty = false,
-                Err(error) => self.log = format!("Не удалось сохранить транскрипт: {error}"),
-            }
-        }
-        if !close {
-            self.transcript_view = Some(view);
-        }
-    }
-
     /// Показывает список X11-окон для выбора «Программа».
     fn window_picker(&mut self, ctx: &egui::Context) {
         if !self.show_windows {
@@ -2149,6 +2099,107 @@ impl ScreenRecorderApp {
         });
     }
 
+    /// Удаляет запись: экспортированное видео, дорожки и транскрипты.
+    fn delete_record(&mut self, record: SessionRecord) {
+        let session_dir = PathBuf::from(&record.output_dir);
+        if self.recording && self.session_dir.as_deref() == Some(session_dir.as_path()) {
+            self.log = "Нельзя удалить запись, которая ещё идёт.".to_string();
+            self.delete_confirm = None;
+            return;
+        }
+        let mut errors = Vec::new();
+        if let Some(export) = &record.export_path {
+            let video = PathBuf::from(export);
+            if video.exists()
+                && let Err(error) = std::fs::remove_file(&video)
+            {
+                errors.push(format!("видео {}: {error}", video.display()));
+            }
+            if let (Some(parent), Some(stem)) = (
+                video.parent(),
+                video.file_stem().and_then(|stem| stem.to_str()),
+            ) {
+                for extension in ["txt", "json", "srt", "vtt", "md"] {
+                    let sidecar = parent.join(format!("{stem}.{extension}"));
+                    if sidecar.exists()
+                        && let Err(error) = std::fs::remove_file(&sidecar)
+                    {
+                        errors.push(format!("{}: {error}", sidecar.display()));
+                    }
+                }
+            }
+        }
+        for name in [
+            "transcript.txt",
+            "transcript.json",
+            "transcript.srt",
+            "transcript.vtt",
+            "transcript.md",
+        ] {
+            let path = session_dir.join(name);
+            if path.exists()
+                && let Err(error) = std::fs::remove_file(&path)
+            {
+                errors.push(format!("{}: {error}", path.display()));
+            }
+        }
+        let recordings_root = self.paths.data_dir.join("recordings");
+        if session_dir.starts_with(&recordings_root)
+            && session_dir != recordings_root
+            && session_dir.exists()
+            && let Err(error) = std::fs::remove_dir_all(&session_dir)
+        {
+            errors.push(format!("сессия {}: {error}", session_dir.display()));
+        }
+        if let Err(error) = self.history.delete_session(&record.id) {
+            errors.push(format!("история: {error}"));
+        }
+        self.history_records.retain(|item| item.id != record.id);
+        self.queued_jobs.retain(|job| job.session_id != record.id);
+        self.delete_confirm = None;
+        if errors.is_empty() {
+            self.log = format!("Удалено: {}", record.title);
+        } else {
+            self.log = format!("Удаление с ошибками: {}", errors.join("; "));
+        }
+    }
+
+    /// Показывает подтверждение удаления записи.
+    fn delete_window(&mut self, ctx: &egui::Context) {
+        let Some(record) = self.delete_confirm.clone() else {
+            return;
+        };
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("Удалить запись")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(RichText::new(&record.title).strong().color(TEXT));
+                ui.label("Видео, аудио и транскрипт этой записи будут удалены.");
+                ui.label(
+                    RichText::new("Действие нельзя отменить.")
+                        .size(11.0)
+                        .color(RED),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Удалить").clicked() {
+                        confirm = true;
+                    }
+                    if ui.button("Отмена").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if confirm {
+            self.delete_record(record);
+        }
+        if cancel {
+            self.delete_confirm = None;
+        }
+    }
+
     /// Рисует вкладку «История».
     fn draw_history(&mut self, ui: &mut egui::Ui) {
         ui.label(
@@ -2206,16 +2257,14 @@ impl ScreenRecorderApp {
                             {
                                 open_path(transcript);
                             }
-                            if let Some(transcript) = &record.transcript_path
-                                && ui.button("Редактировать").clicked()
-                            {
-                                self.open_transcript(transcript.clone());
-                            }
                             if ui.button("Открыть папку").clicked() {
                                 open_path(&record.output_dir);
                             }
                             if ui.button("Копировать путь").clicked() {
                                 ui.ctx().copy_text(record.output_dir.clone());
+                            }
+                            if ui.button("Удалить").clicked() {
+                                self.delete_confirm = Some(record.clone());
                             }
                         });
                     });
@@ -2502,9 +2551,37 @@ impl eframe::App for ScreenRecorderApp {
                 }
             });
         self.window_picker(ui.ctx());
-        self.transcript_window(ui.ctx());
+        self.delete_window(ui.ctx());
         self.persist_settings();
     }
+}
+
+/// Копирует транскрипты рядом с экспортированным видео.
+fn copy_transcripts_next_to_video(
+    video: &Path,
+    output: &TranscriptOutput,
+) -> Result<Vec<PathBuf>, String> {
+    let parent = video
+        .parent()
+        .ok_or_else(|| "у видео нет каталога".to_string())?;
+    let stem = video
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("transcript");
+    let mut written = Vec::new();
+    for (source, extension) in [
+        (&output.text_path, "txt"),
+        (&output.json_path, "json"),
+        (&output.srt_path, "srt"),
+        (&output.vtt_path, "vtt"),
+        (&output.md_path, "md"),
+    ] {
+        let target = parent.join(format!("{stem}.{extension}"));
+        std::fs::copy(source, &target)
+            .map_err(|error| format!("копирование {}: {error}", target.display()))?;
+        written.push(target);
+    }
+    Ok(written)
 }
 
 /// Открывает файл или каталог системным обработчиком.
@@ -2788,5 +2865,35 @@ mod tests {
         let region = parse_region("10,20,800,600").expect("region");
         assert_eq!(region.x, 10);
         assert_eq!(region.width, 800);
+    }
+
+    /// Проверяет копирование транскриптов рядом с видео.
+    #[test]
+    fn copies_transcripts_next_to_video() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session = dir.path().join("session");
+        std::fs::create_dir_all(&session).expect("mkdir");
+        let names = ["txt", "json", "srt", "vtt", "md"];
+        for name in names {
+            std::fs::write(session.join(format!("transcript.{name}")), name).expect("file");
+        }
+        let video = dir.path().join("video.mp4");
+        std::fs::write(&video, b"video").expect("video");
+        let output = TranscriptOutput {
+            text_path: session.join("transcript.txt"),
+            json_path: session.join("transcript.json"),
+            srt_path: session.join("transcript.srt"),
+            vtt_path: session.join("transcript.vtt"),
+            md_path: session.join("transcript.md"),
+            segments: 0,
+            language: "ru".to_string(),
+            warning: None,
+        };
+        let copied = copy_transcripts_next_to_video(&video, &output).expect("copy");
+        assert_eq!(copied.len(), 5);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("video.txt")).expect("txt"),
+            "txt"
+        );
     }
 }

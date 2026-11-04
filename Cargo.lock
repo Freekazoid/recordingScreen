@@ -3661,6 +3661,7 @@ dependencies = [
  "screenrecorder-application",
  "screenrecorder-domain",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

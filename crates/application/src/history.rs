@@ -276,6 +276,18 @@ impl HistoryStore {
         Ok(())
     }
 
+    /// Удаляет сессию и её задачи из истории.
+    pub fn delete_session(&self, session_id: &str) -> Result<(), HistoryError> {
+        let connection = self.connection()?;
+        connection
+            .execute("DELETE FROM jobs WHERE session_id = ?1", [session_id])
+            .map_err(|source| self.sqlite(source))?;
+        connection
+            .execute("DELETE FROM sessions WHERE id = ?1", [session_id])
+            .map_err(|source| self.sqlite(source))?;
+        Ok(())
+    }
+
     /// Возвращает задачи сессии.
     pub fn list_jobs(&self, session_id: &str) -> Result<Vec<JobRecord>, HistoryError> {
         let connection = self.connection()?;
