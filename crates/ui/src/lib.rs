@@ -477,8 +477,13 @@ impl ScreenRecorderApp {
             };
             if !video_running && !self.audio_recorder.is_running() {
                 self.recording = false;
-                self.status = "Запись завершена".to_string();
-                self.log = "Запись завершилась. Проверьте файлы сессии.".to_string();
+                if let Some(error) = self.wayland_recorder.take_error() {
+                    self.status = format!("Ошибка Wayland-записи: {error}");
+                    self.log = format!("Портал/GStreamer: {error}");
+                } else {
+                    self.status = "Запись завершена".to_string();
+                    self.log = "Запись завершилась. Проверьте файлы сессии.".to_string();
+                }
                 if let Some(session_dir) = self.session_dir.clone() {
                     self.start_export(&session_dir);
                 }
@@ -531,8 +536,14 @@ impl ScreenRecorderApp {
     }
 
     /// Рисует кнопку режима записи с иконкой.
-    fn record_button(ui: &mut egui::Ui, image: egui::Image<'_>, label: &str) -> egui::Response {
-        ui.add(
+    fn record_button(
+        ui: &mut egui::Ui,
+        image: egui::Image<'_>,
+        label: &str,
+        enabled: bool,
+    ) -> egui::Response {
+        ui.add_enabled(
+            enabled,
             egui::Button::image_and_text(image, RichText::new(label).size(16.0))
                 .fill(BTN)
                 .corner_radius(CornerRadius::ZERO)
@@ -708,11 +719,18 @@ impl ScreenRecorderApp {
         ui.add_space(6.0);
 
         ui.vertical_centered(|ui| {
+            let recording = self.recording;
+            let fullscreen_label = if recording {
+                "Остановить запись"
+            } else {
+                "Весь экран"
+            };
             if Self::record_button(
                 ui,
                 egui::Image::new(egui::include_image!("../../../assets/fullscreen.png"))
                     .fit_to_exact_size(Vec2::new(24.0, 24.0)),
-                "Весь экран",
+                fullscreen_label,
+                true,
             )
             .clicked()
             {
@@ -724,14 +742,11 @@ impl ScreenRecorderApp {
                 egui::Image::new(egui::include_image!("../../../assets/area.png"))
                     .fit_to_exact_size(Vec2::new(24.0, 24.0)),
                 "Область экрана",
+                !recording,
             )
             .clicked()
             {
-                if self.recording {
-                    self.stop_recording();
-                } else {
-                    self.log = "Режим «Область экрана» будет добавлен на этапе 2.".to_string();
-                }
+                self.log = "Режим «Область экрана» будет добавлен на этапе 2.".to_string();
             }
             ui.add_space(8.0);
             if Self::record_button(
@@ -739,14 +754,11 @@ impl ScreenRecorderApp {
                 egui::Image::new(egui::include_image!("../../../assets/program.png"))
                     .fit_to_exact_size(Vec2::new(24.0, 24.0)),
                 "Программа",
+                !recording,
             )
             .clicked()
             {
-                if self.recording {
-                    self.stop_recording();
-                } else {
-                    self.log = "Режим «Программа» будет добавлен на этапе 2.".to_string();
-                }
+                self.log = "Режим «Программа» будет добавлен на этапе 2.".to_string();
             }
             ui.add_space(8.0);
             if Self::record_button(
@@ -754,14 +766,11 @@ impl ScreenRecorderApp {
                 egui::Image::new(egui::include_image!("../../../assets/empty.png"))
                     .fit_to_exact_size(Vec2::new(24.0, 24.0)),
                 "Только аудио",
+                !recording,
             )
             .clicked()
             {
-                if self.recording {
-                    self.stop_recording();
-                } else {
-                    self.log = "Режим «Только аудио» будет добавлен на этапе 2.".to_string();
-                }
+                self.log = "Режим «Только аудио» будет добавлен на этапе 2.".to_string();
             }
         });
 

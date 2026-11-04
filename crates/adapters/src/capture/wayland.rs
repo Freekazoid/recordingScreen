@@ -11,9 +11,9 @@ use ashpd::desktop::{PersistMode, Session};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -24,6 +24,7 @@ pub struct WaylandPortalRecorder {
     stop_tx: Option<Sender<()>>,
     worker: Option<JoinHandle<()>>,
     active: Arc<AtomicBool>,
+    error: Arc<Mutex<Option<String>>>,
 }
 
 impl WaylandPortalRecorder {
@@ -38,10 +39,15 @@ impl WaylandPortalRecorder {
             return Err("Wayland-запись уже запущена".to_string());
         }
         let output = output.to_path_buf();
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| format!("каталог сессии: {error}"))?;
+        }
         let (start_tx, start_rx) = mpsc::channel();
         let (stop_tx, stop_rx) = mpsc::channel();
         let active = Arc::new(AtomicBool::new(false));
         let worker_active = Arc::clone(&active);
+        let error = Arc::new(Mutex::new(None));
+        let worker_error = Arc::clone(&error);
 
         let worker = thread::spawn(move || {
             let runtime = match tokio::runtime::Runtime::new() {
@@ -75,15 +81,31 @@ impl WaylandPortalRecorder {
                     return;
                 }
             };
+            let mut child = child;
+            // Даём GStreamer время создать файл; если процесс сразу упал,
+            // показываем причину из stderr вместо «запись завершилась».
+            thread::sleep(Duration::from_millis(500));
+            if let Ok(Some(status)) = child.try_wait() {
+                let detail = read_tail(&output.with_extension("gst.log"));
+                let message = format!("gst-launch завершился ({status}): {detail}");
+                if let Ok(mut slot) = worker_error.lock() {
+                    *slot = Some(message.clone());
+                }
+                let _ = start_tx.send(Err(message));
+                return;
+            }
             worker_active.store(true, Ordering::SeqCst);
             let _ = start_tx.send(Ok(()));
 
-            let mut child = child;
             loop {
                 if stop_rx.try_recv().is_ok() {
                     break;
                 }
-                if let Ok(Some(_)) = child.try_wait() {
+                if let Ok(Some(status)) = child.try_wait() {
+                    let detail = read_tail(&output.with_extension("gst.log"));
+                    if let Ok(mut slot) = worker_error.lock() {
+                        *slot = Some(format!("gst-launch завершился ({status}): {detail}"));
+                    }
                     break;
                 }
                 thread::sleep(Duration::from_millis(100));
@@ -99,7 +121,13 @@ impl WaylandPortalRecorder {
         self.stop_tx = Some(stop_tx);
         self.worker = Some(worker);
         self.active = active;
+        self.error = error;
         Ok(())
+    }
+
+    /// Возвращает последнюю ошибку GStreamer/портала, если была.
+    pub fn take_error(&self) -> Option<String> {
+        self.error.lock().ok().and_then(|mut slot| slot.take())
     }
 
     /// Возвращает результат запуска портала, если он уже готов.
@@ -187,13 +215,27 @@ async fn open_portal() -> Result<(Screencast, Session<Screencast>, OwnedFd, u32)
 /// Запускает GStreamer-пайплайн записи PipeWire в MKV.
 fn spawn_gst(fd: i32, node_id: u32, output: &Path, fps: u32) -> Result<Child, String> {
     let args = build_gst_args(fd, node_id, output, fps);
+    let log_path = output.with_extension("gst.log");
+    let log = std::fs::File::create(&log_path)
+        .map_err(|error| format!("лог GStreamer {}: {error}", log_path.display()))?;
     Command::new("gst-launch-1.0")
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(log))
         .spawn()
         .map_err(|error| format!("gst-launch-1.0: {error}"))
+}
+
+/// Читает последние строки лога GStreamer.
+fn read_tail(path: &Path) -> String {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().rev().take(8).collect();
+    if lines.is_empty() {
+        "нет вывода gst-launch".to_string()
+    } else {
+        lines.into_iter().rev().collect::<Vec<_>>().join(" | ")
+    }
 }
 
 /// Собирает аргументы `gst-launch-1.0`.
