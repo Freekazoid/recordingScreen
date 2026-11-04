@@ -4,6 +4,7 @@
 //! (default source или выбранное устройство). Это основа channel-aware
 //! транскрипции и preflight-проверки уровня сигнала.
 
+use screenrecorder_domain::TrackStats;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -502,6 +503,62 @@ fn read_probe(path: &Path) -> Result<AudioProbe, AudioError> {
     })
 }
 
+/// Результат анализа аудиодорожки целиком.
+#[derive(Debug, Clone, Copy)]
+pub struct AudioTrackAnalysis {
+    pub stats: TrackStats,
+    pub duration_ms: u64,
+}
+
+/// Считает RMS/peak/тишину/клиппинг по всему WAV.
+pub fn analyze_track(path: &Path) -> Result<AudioTrackAnalysis, AudioError> {
+    let mut reader = hound::WavReader::open(path)
+        .map_err(|error| AudioError::Probe(format!("не удалось прочитать WAV: {error}")))?;
+    let spec = reader.spec();
+    if spec.sample_format != hound::SampleFormat::Int || spec.bits_per_sample != 16 {
+        return Err(AudioError::Probe("ожидается PCM s16 WAV".to_string()));
+    }
+    if spec.channels == 0 || spec.sample_rate == 0 {
+        return Err(AudioError::Probe("некорректный формат WAV".to_string()));
+    }
+    let mut sum = 0.0_f64;
+    let mut count = 0_u64;
+    let mut peak = 0.0_f32;
+    let mut quiet = 0_u64;
+    let mut clipped = 0_u64;
+    for sample in reader.samples::<i16>() {
+        let value = sample
+            .map_err(|error| AudioError::Probe(format!("ошибка чтения сэмпла: {error}")))?
+            as f32
+            / 32768.0;
+        let absolute = value.abs();
+        sum += (value as f64).powi(2);
+        count += 1;
+        peak = peak.max(absolute);
+        if absolute < 0.003_162_3 {
+            quiet += 1;
+        }
+        if absolute >= 0.999 {
+            clipped += 1;
+        }
+    }
+    if count == 0 {
+        return Err(AudioError::Probe("в записи нет сэмплов".to_string()));
+    }
+    let rms = (sum / count as f64).sqrt() as f32;
+    let frames = count / u64::from(spec.channels);
+    let duration_ms = frames.saturating_mul(1000) / u64::from(spec.sample_rate);
+    Ok(AudioTrackAnalysis {
+        stats: TrackStats {
+            rms_dbfs: 20.0 * rms.max(1e-9).log10(),
+            peak_dbfs: 20.0 * peak.max(1e-9).log10(),
+            silence_ratio: quiet as f32 / count as f32,
+            clipping_ratio: clipped as f32 / count as f32,
+        },
+        duration_ms,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,5 +639,53 @@ mod tests {
         let probe = read_levels(&path).expect("levels");
         assert!(!probe.silent);
         assert!(probe.rms_dbfs > -20.0);
+    }
+
+    /// Проверяет анализ тональной дорожки.
+    #[test]
+    fn analyzes_tone_track() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tone.wav");
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).expect("wav");
+        for index in 0..48_000 {
+            let value = (index as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin();
+            let sample = (value * 0.5 * i16::MAX as f32) as i16;
+            writer.write_sample(sample).expect("left");
+            writer.write_sample(sample).expect("right");
+        }
+        writer.finalize().expect("finalize");
+        let analysis = analyze_track(&path).expect("analysis");
+        assert_eq!(analysis.duration_ms, 1_000);
+        assert!(analysis.stats.rms_dbfs > -20.0);
+        assert!(analysis.stats.silence_ratio < 0.1);
+        assert_eq!(analysis.stats.clipping_ratio, 0.0);
+    }
+
+    /// Проверяет, что тихая дорожка помечается тишиной.
+    #[test]
+    fn analyzes_silent_track() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("silence.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).expect("wav");
+        for _ in 0..16_000 {
+            writer.write_sample(0_i16).expect("sample");
+        }
+        writer.finalize().expect("finalize");
+        let analysis = analyze_track(&path).expect("analysis");
+        assert_eq!(analysis.duration_ms, 1_000);
+        assert!(analysis.stats.rms_dbfs < -90.0);
+        assert_eq!(analysis.stats.silence_ratio, 1.0);
     }
 }

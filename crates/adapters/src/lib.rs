@@ -8,8 +8,8 @@ pub mod paths;
 mod portal;
 
 pub use audio::{
-    AudioDevice, AudioDeviceKind, AudioError, AudioProbe, AudioStart, LinuxAudioRecorder,
-    read_levels,
+    AudioDevice, AudioDeviceKind, AudioError, AudioProbe, AudioStart, AudioTrackAnalysis,
+    LinuxAudioRecorder, analyze_track, read_levels,
 };
 pub use capture::{
     CaptureError, PORTAL_CANCELLED, PortalSource, Region, WaylandPortalRecorder, WindowInfo,

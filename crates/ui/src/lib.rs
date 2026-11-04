@@ -13,10 +13,14 @@ use eframe::egui::{
 use screenrecorder_adapters::{
     AudioDevice, AudioDeviceKind, AudioProbe, DownloadProgress, ExportRequest, LinuxAudioRecorder,
     ModelManager, PORTAL_CANCELLED, Paths, PortalSource, Region, WaylandPortalRecorder, WindowInfo,
-    X11VideoRecorder, list_windows, merge_audio, merge_recording, read_levels, take_screenshot,
+    X11VideoRecorder, analyze_track, list_windows, merge_audio, merge_recording, read_levels,
+    take_screenshot,
 };
-use screenrecorder_application::{Settings, SettingsStore};
-use screenrecorder_domain::SessionId;
+use screenrecorder_application::{
+    ManifestState, Rect, SessionManifest, Settings, SettingsStore, TrackManifest,
+    append_session_log, load_manifest, recover_incomplete, save_manifest,
+};
+use screenrecorder_domain::{SessionId, TrackKind, TrackStats, TrackStatus};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -92,6 +96,7 @@ pub struct ScreenRecorderApp {
     area_rx: Option<Receiver<Result<Region, String>>>,
     window_list: Vec<WindowInfo>,
     show_windows: bool,
+    manifest: Option<SessionManifest>,
 }
 
 impl ScreenRecorderApp {
@@ -99,12 +104,22 @@ impl ScreenRecorderApp {
     pub fn new(paths: Paths, settings: Settings) -> Self {
         let model_manager = ModelManager::new(paths.models_dir());
         let audio_devices = LinuxAudioRecorder::list_devices().unwrap_or_default();
+        let recovered = recover_incomplete(&paths.data_dir.join("recordings")).unwrap_or_default();
+        let log = if recovered.is_empty() {
+            "Готово. Проверьте систему и настройки.".to_string()
+        } else {
+            format!(
+                "Восстановлено незавершённых сессий: {}. Файлы лежат в {}.",
+                recovered.len(),
+                paths.data_dir.join("recordings").display()
+            )
+        };
         Self {
             paths,
             settings,
             screen: Screen::Record,
             status: "Модели не скачаны".to_string(),
-            log: "Готово. Проверьте систему и настройки.".to_string(),
+            log,
             output_format: "mp4".to_string(),
             video_quality: "Хорошее (CRF 23)".to_string(),
             audio_track_mode: "Как есть (без пережатия)".to_string(),
@@ -136,7 +151,233 @@ impl ScreenRecorderApp {
             area_rx: None,
             window_list: Vec::new(),
             show_windows: false,
+            manifest: None,
         }
+    }
+
+    /// Создаёт манифест и журнал сессии перед стартом захвата.
+    fn begin_manifest(
+        &mut self,
+        session_dir: &Path,
+        mode: &str,
+        backend: &str,
+        region: Option<Region>,
+    ) {
+        if let Err(error) = std::fs::create_dir_all(session_dir) {
+            self.log = format!("Не удалось создать каталог сессии: {error}");
+            return;
+        }
+        let session_id = session_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("session")
+            .to_string();
+        let mut manifest = SessionManifest::new(
+            session_id,
+            mode,
+            backend,
+            self.settings.capture.fps,
+            region.map(Self::rect_from_region),
+        );
+        manifest.audio_offset_ms = self.audio_offset_ms;
+        if let Err(error) = save_manifest(session_dir, &manifest) {
+            self.log = format!("Не удалось сохранить манифест: {error}");
+        }
+        append_session_log(
+            session_dir,
+            &format!(
+                "старт: режим={mode}, backend={backend}, fps={}",
+                self.settings.capture.fps
+            ),
+        );
+        self.manifest = Some(manifest);
+    }
+
+    /// Преобразует область в прямоугольник манифеста.
+    fn rect_from_region(region: Region) -> Rect {
+        Rect {
+            x: region.x,
+            y: region.y,
+            width: region.width,
+            height: region.height,
+        }
+    }
+
+    /// Добавляет дорожку в текущий манифест.
+    fn add_manifest_track(
+        &mut self,
+        kind: TrackKind,
+        path: &str,
+        device: Option<String>,
+        sample_rate: Option<u32>,
+        channels: Option<u16>,
+        start_offset_ms: i64,
+    ) {
+        let Some(manifest) = self.manifest.as_mut() else {
+            return;
+        };
+        manifest.add_track(TrackManifest {
+            kind,
+            path: path.to_string(),
+            device,
+            sample_rate,
+            channels,
+            duration_ms: None,
+            start_offset_ms,
+            status: TrackStatus::Recording,
+            stats: TrackStats::default(),
+        });
+    }
+
+    /// Добавляет предупреждение в текущий манифест.
+    fn warn_manifest(&mut self, warning: impl Into<String>) {
+        if let Some(manifest) = self.manifest.as_mut() {
+            manifest.warn(warning);
+        }
+    }
+
+    /// Помечает текущую сессию ошибкой и сохраняет манифест.
+    fn fail_manifest(&mut self, reason: &str) {
+        let Some(mut manifest) = self.manifest.take() else {
+            return;
+        };
+        manifest.warn(reason);
+        manifest.finish(ManifestState::Failed);
+        if let Some(dir) = &self.session_dir {
+            let _ = save_manifest(dir, &manifest);
+            append_session_log(dir, &format!("ошибка: {reason}"));
+        }
+    }
+
+    /// Помечает текущую сессию отменённой и сохраняет манифест.
+    fn cancel_manifest(&mut self, reason: &str) {
+        let Some(mut manifest) = self.manifest.take() else {
+            return;
+        };
+        manifest.warn(reason);
+        manifest.finish(ManifestState::Cancelled);
+        if let Some(dir) = &self.session_dir {
+            let _ = save_manifest(dir, &manifest);
+            append_session_log(dir, reason);
+        }
+    }
+
+    /// Обновляет смещение аудио в манифесте.
+    fn set_audio_offset(&mut self, offset_ms: i64) {
+        self.audio_offset_ms = offset_ms;
+        let Some(manifest) = self.manifest.as_mut() else {
+            return;
+        };
+        manifest.audio_offset_ms = offset_ms;
+        for track in &mut manifest.tracks {
+            if matches!(track.kind, TrackKind::System | TrackKind::Mic) {
+                track.start_offset_ms = offset_ms;
+            }
+        }
+    }
+
+    /// Считает статистику дорожек, завершает манифест и сохраняет его.
+    fn finalize_manifest(&mut self, audio_only: bool) {
+        let Some(dir) = self.session_dir.clone() else {
+            return;
+        };
+        let Some(mut manifest) = self.manifest.take() else {
+            return;
+        };
+        manifest.audio_offset_ms = self.audio_offset_ms;
+        if !audio_only {
+            let video = dir.join("screen.mkv");
+            let ready = std::fs::metadata(&video).is_ok_and(|meta| meta.len() > 0);
+            manifest.add_track(TrackManifest {
+                kind: TrackKind::Screen,
+                path: "screen.mkv".to_string(),
+                device: None,
+                sample_rate: None,
+                channels: None,
+                duration_ms: None,
+                start_offset_ms: 0,
+                status: if ready {
+                    TrackStatus::Ready
+                } else {
+                    TrackStatus::Failed
+                },
+                stats: TrackStats::default(),
+            });
+            if !ready {
+                manifest.warn("Видеофайл не создан или пуст.");
+            }
+        }
+
+        let mut warnings = Vec::new();
+        let mut silent = Vec::new();
+        let mut any_ready = false;
+        for track in &mut manifest.tracks {
+            if !matches!(track.kind, TrackKind::System | TrackKind::Mic) {
+                continue;
+            }
+            let path = dir.join(&track.path);
+            match analyze_track(&path) {
+                Ok(analysis) => {
+                    track.duration_ms = Some(analysis.duration_ms);
+                    track.stats = analysis.stats;
+                    let is_silent =
+                        analysis.stats.silence_ratio >= 0.98 && analysis.stats.rms_dbfs < -60.0;
+                    track.status = if is_silent {
+                        TrackStatus::Silent
+                    } else {
+                        TrackStatus::Ready
+                    };
+                    any_ready = true;
+                    if is_silent {
+                        silent.push(match track.kind {
+                            TrackKind::System => "системный звук",
+                            TrackKind::Mic => "микрофон",
+                            _ => "аудио",
+                        });
+                    }
+                }
+                Err(error) => {
+                    track.status = TrackStatus::Failed;
+                    warnings.push(format!("{}: {error}", track.path));
+                }
+            }
+        }
+        for warning in warnings {
+            manifest.warn(warning);
+        }
+        if manifest
+            .tracks
+            .iter()
+            .any(|track| track.kind == TrackKind::Screen && track.status == TrackStatus::Ready)
+        {
+            any_ready = true;
+        }
+        match silent.as_slice() {
+            [one] => manifest.warn(format!(
+                "{one} записан тихо; вторая дорожка продолжает работать."
+            )),
+            [_, _, ..] => {
+                manifest.warn("Обе аудиодорожки тихие: проверьте устройства и уровень сигнала.")
+            }
+            [] => {}
+        }
+        manifest.finish(if any_ready {
+            ManifestState::Recorded
+        } else {
+            ManifestState::Failed
+        });
+        if let Err(error) = save_manifest(&dir, &manifest) {
+            self.log = format!("Не удалось сохранить манифест: {error}");
+        }
+        append_session_log(
+            &dir,
+            &format!(
+                "стоп: state={:?}, дорожек={}, предупреждений={}",
+                manifest.state,
+                manifest.tracks.len(),
+                manifest.warnings.len()
+            ),
+        );
     }
 
     /// Открывает нативный диалог выбора каталога.
@@ -277,15 +518,41 @@ impl ScreenRecorderApp {
     }
 
     /// Запускает аудиодорожки в каталоге сессии.
-    fn start_audio(&mut self, session_dir: &Path) {
-        let mic_device = self.settings.capture.mic_device.clone();
-        let system_device = self.settings.capture.system_device.clone();
+    fn start_audio(&mut self, session_dir: &Path) -> Option<screenrecorder_adapters::AudioStart> {
+        let mic_setting = self.settings.capture.mic_device.clone();
+        let system_setting = self.settings.capture.system_device.clone();
+        let mic_device = (!mic_setting.trim().is_empty()).then(|| mic_setting.trim().to_string());
+        let system_device =
+            (!system_setting.trim().is_empty()).then(|| system_setting.trim().to_string());
         match self.audio_recorder.start(
             session_dir,
-            Some(system_device.as_str()),
-            Some(mic_device.as_str()),
+            system_device.as_deref(),
+            mic_device.as_deref(),
         ) {
             Ok(audio) => {
+                if audio.system {
+                    self.add_manifest_track(
+                        TrackKind::System,
+                        "system.wav",
+                        system_device,
+                        Some(48_000),
+                        Some(2),
+                        self.audio_offset_ms,
+                    );
+                }
+                if audio.mic {
+                    self.add_manifest_track(
+                        TrackKind::Mic,
+                        "mic.wav",
+                        mic_device,
+                        Some(48_000),
+                        Some(1),
+                        self.audio_offset_ms,
+                    );
+                }
+                for warning in &audio.warnings {
+                    self.warn_manifest(warning.clone());
+                }
                 if !audio.warnings.is_empty() {
                     self.log = format!(
                         "Видео пишется, но звук неполный: {}",
@@ -299,9 +566,12 @@ impl ScreenRecorderApp {
                 } else {
                     self.log = "Запись: доступна только часть аудиодорожек".to_string();
                 }
+                Some(audio)
             }
             Err(error) => {
+                self.warn_manifest(format!("аудио: {error}"));
                 self.log = format!("Видео пишется без звука: {error}");
+                None
             }
         }
     }
@@ -386,7 +656,19 @@ impl ScreenRecorderApp {
         let session_dir = self.paths.session_dir(session_id.as_str());
         let output = session_dir.join("screen.mkv");
         self.audio_only = false;
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        self.begin_manifest(
+            &session_dir,
+            mode,
+            if wayland {
+                "portal-pipewire-gst"
+            } else {
+                "ffmpeg-x11grab"
+            },
+            Some(region),
+        );
+        self.session_dir = Some(session_dir.clone());
+        if wayland {
             match self.wayland_recorder.start_with_source(
                 &output,
                 self.settings.capture.fps,
@@ -403,6 +685,7 @@ impl ScreenRecorderApp {
                     self.status = "Wayland: ожидание доступа к области…".to_string();
                 }
                 Err(error) => {
+                    self.fail_manifest(&error);
                     self.status = format!("Ошибка области: {error}");
                     self.log = error;
                 }
@@ -418,13 +701,16 @@ impl ScreenRecorderApp {
                 self.using_wayland = false;
                 self.wayland_pending = false;
                 self.start_audio(&session_dir);
-                self.audio_offset_ms = started.elapsed().as_millis() as i64;
+                let offset = started.elapsed().as_millis() as i64;
+                self.set_audio_offset(offset);
                 self.recording = true;
                 self.recording_mode = Some(mode);
                 self.session_dir = Some(session_dir);
                 self.status = format!("Идёт запись области {}×{}", region.width, region.height);
             }
             Err(error) => {
+                let reason = error.to_string();
+                self.fail_manifest(&reason);
                 self.status = format!("Ошибка области: {error}");
             }
         }
@@ -437,6 +723,8 @@ impl ScreenRecorderApp {
             let session_dir = self.paths.session_dir(session_id.as_str());
             let output = session_dir.join("screen.mkv");
             self.audio_only = false;
+            self.begin_manifest(&session_dir, "Программа", "portal-pipewire-gst", None);
+            self.session_dir = Some(session_dir.clone());
             match self.wayland_recorder.start_with_source(
                 &output,
                 self.settings.capture.fps,
@@ -453,6 +741,7 @@ impl ScreenRecorderApp {
                     self.status = "Wayland: выбор окна…".to_string();
                 }
                 Err(error) => {
+                    self.fail_manifest(&error);
                     self.status = format!("Ошибка выбора окна: {error}");
                 }
             }
@@ -491,13 +780,15 @@ impl ScreenRecorderApp {
             self.audio_only = true;
             self.using_wayland = false;
             self.wayland_pending = false;
+            self.session_dir = Some(session_dir.clone());
+            self.begin_manifest(&session_dir, mode, "pw-record", None);
             self.start_audio(&session_dir);
             if self.audio_recorder.is_running() {
                 self.recording = true;
                 self.recording_mode = Some("Только аудио");
-                self.session_dir = Some(session_dir);
                 self.status = "Идёт аудиозапись".to_string();
             } else {
+                self.fail_manifest("не удалось начать запись звука");
                 self.audio_only = false;
                 self.recording_mode = None;
                 self.status = "Не удалось начать запись звука".to_string();
@@ -519,8 +810,20 @@ impl ScreenRecorderApp {
         let session_id = SessionId::new();
         let session_dir = self.paths.session_dir(session_id.as_str());
         let output = session_dir.join("screen.mkv");
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        self.begin_manifest(
+            &session_dir,
+            mode,
+            if wayland {
+                "portal-pipewire-gst"
+            } else {
+                "ffmpeg-x11grab"
+            },
+            None,
+        );
+        self.session_dir = Some(session_dir.clone());
 
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        if wayland {
             match self
                 .wayland_recorder
                 .start(&output, self.settings.capture.fps)
@@ -536,6 +839,7 @@ impl ScreenRecorderApp {
                     self.log = "Подтвердите доступ к экрану в системном диалоге.".to_string();
                 }
                 Err(error) => {
+                    self.fail_manifest(&error);
                     self.status = format!("Ошибка Wayland-записи: {error}");
                     self.log = format!("Не удалось запустить портал: {error}");
                 }
@@ -549,13 +853,16 @@ impl ScreenRecorderApp {
                 self.using_wayland = false;
                 self.wayland_pending = false;
                 self.start_audio(&session_dir);
-                self.audio_offset_ms = video_started.elapsed().as_millis() as i64;
+                let offset = video_started.elapsed().as_millis() as i64;
+                self.set_audio_offset(offset);
                 self.recording = true;
                 self.recording_mode = Some(mode);
                 self.session_dir = Some(session_dir);
                 self.status = format!("Идёт запись: {mode}");
             }
             Err(error) => {
+                let reason = error.to_string();
+                self.fail_manifest(&reason);
                 self.status = format!("Ошибка записи: {error}");
                 self.log = format!("Не удалось начать запись: {error}");
             }
@@ -599,12 +906,20 @@ impl ScreenRecorderApp {
         if was_wayland_pending && !was_wayland_active {
             // Остановка кнопкой, а не Esc: просто сообщаем, что запись не
             // успела начаться и файла ещё нет.
+            self.cancel_manifest("остановлено до получения доступа к экрану");
             self.status = "Запись остановлена".to_string();
             self.log = format!(
                 "Остановлено до подтверждения доступа к экрану; файл записи может отсутствовать: {dir}"
             );
             return;
         }
+        if let Err(error) = &video_result {
+            self.warn_manifest(format!("видео: {error}"));
+        }
+        if let Err(error) = &audio_result {
+            self.warn_manifest(format!("аудио: {error}"));
+        }
+        self.finalize_manifest(audio_only);
         match (video_result, audio_result) {
             (Ok(()), Ok(())) => {
                 self.status = "Запись остановлена".to_string();
@@ -616,6 +931,7 @@ impl ScreenRecorderApp {
             }
         }
         if let Some(session_dir) = self.session_dir.clone() {
+            append_session_log(&session_dir, "остановка записи");
             self.start_export(&session_dir, audio_only);
         }
     }
@@ -721,6 +1037,13 @@ impl ScreenRecorderApp {
             Ok(path) => {
                 self.status = "Экспорт завершён".to_string();
                 self.log = format!("Готово: {}", path.display());
+                if let Some(dir) = self.session_dir.clone()
+                    && let Ok(mut manifest) = load_manifest(&dir)
+                {
+                    manifest.set_exported(path.display().to_string());
+                    let _ = save_manifest(&dir, &manifest);
+                    append_session_log(&dir, &format!("экспорт: {}", path.display()));
+                }
             }
             Err(error) => {
                 self.status = format!("Ошибка экспорта: {error}");
@@ -759,6 +1082,7 @@ impl ScreenRecorderApp {
                     Ok(()) => {
                         if let Some(session_dir) = self.session_dir.clone() {
                             self.start_audio(&session_dir);
+                            append_session_log(&session_dir, "портал ScreenCast запущен");
                         }
                         self.status = "Идёт запись: Wayland".to_string();
                         self.log = "Портал ScreenCast запущен.".to_string();
@@ -768,6 +1092,7 @@ impl ScreenRecorderApp {
                         self.using_wayland = false;
                         self.recording_mode = None;
                         let _ = self.wayland_recorder.stop();
+                        self.fail_manifest(&error);
                         if error == PORTAL_CANCELLED {
                             self.status = "Доступ к экрану не предоставлен".to_string();
                             self.log = "Диалог портала закрыт без подтверждения.".to_string();
@@ -793,12 +1118,14 @@ impl ScreenRecorderApp {
                 let audio_only = self.audio_only;
                 self.audio_only = false;
                 if let Some(error) = self.wayland_recorder.take_error() {
+                    self.warn_manifest(format!("портал/GStreamer: {error}"));
                     self.status = format!("Ошибка Wayland-записи: {error}");
                     self.log = format!("Портал/GStreamer: {error}");
                 } else {
                     self.status = "Запись завершена".to_string();
                     self.log = "Запись завершилась. Проверьте файлы сессии.".to_string();
                 }
+                self.finalize_manifest(audio_only);
                 if let Some(session_dir) = self.session_dir.clone() {
                     self.start_export(&session_dir, audio_only);
                 }

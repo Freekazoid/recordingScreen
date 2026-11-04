@@ -3,6 +3,6 @@
 pub mod linux;
 
 pub use linux::{
-    AudioDevice, AudioDeviceKind, AudioError, AudioProbe, AudioStart, LinuxAudioRecorder,
-    read_levels,
+    AudioDevice, AudioDeviceKind, AudioError, AudioProbe, AudioStart, AudioTrackAnalysis,
+    LinuxAudioRecorder, analyze_track, read_levels,
 };
