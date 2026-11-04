@@ -2,4 +2,4 @@
 
 pub mod ffmpeg;
 
-pub use ffmpeg::{ExportRequest, MediaError, merge_recording};
+pub use ffmpeg::{ExportRequest, MediaError, merge_audio, merge_recording};

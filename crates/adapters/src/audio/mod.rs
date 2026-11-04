@@ -4,4 +4,5 @@ pub mod linux;
 
 pub use linux::{
     AudioDevice, AudioDeviceKind, AudioError, AudioProbe, AudioStart, LinuxAudioRecorder,
+    read_levels,
 };

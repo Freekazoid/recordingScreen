@@ -12,13 +12,14 @@ use eframe::egui::{
 };
 use screenrecorder_adapters::{
     AudioDevice, AudioDeviceKind, AudioProbe, DownloadProgress, ExportRequest, LinuxAudioRecorder,
-    ModelManager, Paths, WaylandPortalRecorder, X11VideoRecorder, merge_recording,
+    ModelManager, Paths, WaylandPortalRecorder, X11VideoRecorder, merge_audio, merge_recording,
+    read_levels,
 };
 use screenrecorder_application::{Settings, SettingsStore};
 use screenrecorder_domain::SessionId;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// События фоновой загрузки модели.
 enum DownloadEvent {
@@ -82,6 +83,10 @@ pub struct ScreenRecorderApp {
     export_rx: Option<Receiver<Result<PathBuf, String>>>,
     exporting: bool,
     audio_offset_ms: i64,
+    audio_only: bool,
+    mic_dbfs: f32,
+    system_dbfs: f32,
+    last_levels: Instant,
 }
 
 impl ScreenRecorderApp {
@@ -118,6 +123,10 @@ impl ScreenRecorderApp {
             export_rx: None,
             exporting: false,
             audio_offset_ms: 0,
+            audio_only: false,
+            mic_dbfs: -90.0,
+            system_dbfs: -90.0,
+            last_levels: Instant::now(),
         }
     }
 
@@ -295,6 +304,29 @@ impl ScreenRecorderApp {
             return;
         }
 
+        if mode == "Только аудио" {
+            let session_id = SessionId::new();
+            let session_dir = self.paths.session_dir(session_id.as_str());
+            if let Err(error) = std::fs::create_dir_all(&session_dir) {
+                self.status = format!("Ошибка каталога сессии: {error}");
+                return;
+            }
+            self.audio_only = true;
+            self.using_wayland = false;
+            self.wayland_pending = false;
+            self.start_audio(&session_dir);
+            if self.audio_recorder.is_running() {
+                self.recording = true;
+                self.session_dir = Some(session_dir);
+                self.status = "Идёт аудиозапись".to_string();
+            } else {
+                self.audio_only = false;
+                self.status = "Не удалось начать запись звука".to_string();
+            }
+            return;
+        }
+
+        self.audio_only = false;
         let session_id = SessionId::new();
         let session_dir = self.paths.session_dir(session_id.as_str());
         let output = session_dir.join("screen.mkv");
@@ -346,11 +378,15 @@ impl ScreenRecorderApp {
         }
         self.recording = false;
         self.wayland_pending = false;
+        let audio_only = self.audio_only;
+        self.audio_only = false;
         let audio_result = self
             .audio_recorder
             .stop()
             .map_err(|error| error.to_string());
-        let video_result: Result<(), String> = if self.using_wayland {
+        let video_result: Result<(), String> = if audio_only {
+            Ok(())
+        } else if self.using_wayland {
             self.wayland_recorder.stop()
         } else {
             self.recorder.stop().map_err(|error| error.to_string())
@@ -372,12 +408,16 @@ impl ScreenRecorderApp {
             }
         }
         if let Some(session_dir) = self.session_dir.clone() {
-            self.start_export(&session_dir);
+            self.start_export(&session_dir, audio_only);
         }
     }
 
     /// Запускает экспорт записи в выбранный формат в фоне.
-    fn start_export(&mut self, session_dir: &Path) {
+    fn start_export(&mut self, session_dir: &Path, audio_only: bool) {
+        if audio_only {
+            self.start_audio_export(session_dir);
+            return;
+        }
         if self.exporting {
             return;
         }
@@ -421,6 +461,42 @@ impl ScreenRecorderApp {
         self.log = format!("Экспорт: {}", output.display());
     }
 
+    /// Экспортирует только аудиодорожки в WAV.
+    fn start_audio_export(&mut self, session_dir: &Path) {
+        if self.exporting {
+            return;
+        }
+        let system = session_dir.join("system.wav");
+        let mic = session_dir.join("mic.wav");
+        if !system.exists() && !mic.exists() {
+            self.log = "Экспорт аудио пропущен: нет дорожек.".to_string();
+            return;
+        }
+        let output_dir = if self.settings.output_dir.trim().is_empty() {
+            self.paths.default_output_dir.clone()
+        } else {
+            PathBuf::from(&self.settings.output_dir)
+        };
+        if let Err(error) = self.paths.ensure_writable(&output_dir) {
+            self.status = format!("Ошибка папки результатов: {error}");
+            return;
+        }
+        let stamp = Local::now().format("%Y-%m-%d_%H-%M-%S");
+        let output = output_dir.join(format!("{stamp}.wav"));
+        let system = system.exists().then_some(system);
+        let mic = mic.exists().then_some(mic);
+        let target = output.clone();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = merge_audio(system, mic, &target).map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+        self.export_rx = Some(receiver);
+        self.exporting = true;
+        self.status = "Экспорт аудио...".to_string();
+        self.log = format!("Экспорт аудио: {}", output.display());
+    }
+
     /// Забирает результат фонового экспорта.
     fn poll_export(&mut self) {
         let result = match &self.export_rx {
@@ -445,8 +521,29 @@ impl ScreenRecorderApp {
         }
     }
 
+    /// Обновляет уровни микрофона/системы во время записи.
+    fn update_levels(&mut self) {
+        if !self.recording || self.wayland_pending {
+            return;
+        }
+        if self.last_levels.elapsed() < Duration::from_millis(250) {
+            return;
+        }
+        self.last_levels = Instant::now();
+        let Some(dir) = &self.session_dir else {
+            return;
+        };
+        if let Ok(probe) = read_levels(&dir.join("mic.wav")) {
+            self.mic_dbfs = probe.rms_dbfs;
+        }
+        if let Ok(probe) = read_levels(&dir.join("system.wav")) {
+            self.system_dbfs = probe.rms_dbfs;
+        }
+    }
+
     /// Проверяет, не завершились ли процессы записи сами.
     fn poll_recording(&mut self) {
+        self.update_levels();
         if self.wayland_pending {
             if let Some(result) = self.wayland_recorder.take_start_result() {
                 self.wayland_pending = false;
@@ -477,6 +574,8 @@ impl ScreenRecorderApp {
             };
             if !video_running && !self.audio_recorder.is_running() {
                 self.recording = false;
+                let audio_only = self.audio_only;
+                self.audio_only = false;
                 if let Some(error) = self.wayland_recorder.take_error() {
                     self.status = format!("Ошибка Wayland-записи: {error}");
                     self.log = format!("Портал/GStreamer: {error}");
@@ -485,10 +584,21 @@ impl ScreenRecorderApp {
                     self.log = "Запись завершилась. Проверьте файлы сессии.".to_string();
                 }
                 if let Some(session_dir) = self.session_dir.clone() {
-                    self.start_export(&session_dir);
+                    self.start_export(&session_dir, audio_only);
                 }
             }
         }
+    }
+
+    /// Рисует индикатор уровня сигнала.
+    fn level_bar(ui: &mut egui::Ui, label: &str, dbfs: f32) {
+        let fraction = ((dbfs + 60.0) / 60.0).clamp(0.0, 1.0);
+        ui.label(RichText::new(label).size(12.0).color(TEXT));
+        ui.add(
+            egui::ProgressBar::new(fraction)
+                .desired_width(120.0)
+                .text(format!("{dbfs:.0} dB")),
+        );
     }
 
     /// Рисует строку состояния моделей.
@@ -716,6 +826,14 @@ impl ScreenRecorderApp {
     /// Рисует вкладку «Запись».
     fn draw_record(&mut self, ui: &mut egui::Ui) {
         self.status_row(ui);
+        if self.recording {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                Self::level_bar(ui, "Mic", self.mic_dbfs);
+                ui.add_space(8.0);
+                Self::level_bar(ui, "System", self.system_dbfs);
+            });
+        }
         ui.add_space(6.0);
 
         ui.vertical_centered(|ui| {
@@ -770,7 +888,7 @@ impl ScreenRecorderApp {
             )
             .clicked()
             {
-                self.log = "Режим «Только аудио» будет добавлен на этапе 2.".to_string();
+                self.toggle_recording("Только аудио");
             }
         });
 

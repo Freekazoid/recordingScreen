@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+};
 use thiserror::Error;
 
 /// Ошибки аудиозахвата.
@@ -422,6 +426,49 @@ fn default_node(target: &str, kind: &str) -> Result<String, AudioError> {
     Err(AudioError::NoDevice(kind.to_string()))
 }
 
+/// Читает последние ~0.5 с WAV и считает уровень для индикатора.
+pub fn read_levels(path: &Path) -> Result<AudioProbe, AudioError> {
+    let mut file = File::open(path)
+        .map_err(|error| AudioError::Probe(format!("открытие {}: {error}", path.display())))?;
+    let length = file
+        .metadata()
+        .map_err(|error| AudioError::Probe(format!("размер {}: {error}", path.display())))?
+        .len();
+    if length <= 44 {
+        return Err(AudioError::Probe("WAV ещё пуст".to_string()));
+    }
+    let tail = 96_000_u64; // 0.5 с stereo s16 48 кГц
+    let mut start = length.saturating_sub(tail).max(44);
+    if start % 2 == 1 {
+        start += 1;
+    }
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| AudioError::Probe(format!("seek: {error}")))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| AudioError::Probe(format!("чтение: {error}")))?;
+    let mut sum = 0.0_f64;
+    let mut count = 0_u64;
+    let mut peak = 0.0_f32;
+    for chunk in bytes.as_chunks::<2>().0 {
+        let value = i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32768.0;
+        sum += (value as f64).powi(2);
+        count += 1;
+        peak = peak.max(value.abs());
+    }
+    if count == 0 {
+        return Err(AudioError::Probe("нет сэмплов".to_string()));
+    }
+    let rms = (sum / count as f64).sqrt() as f32;
+    let rms_dbfs = 20.0 * rms.max(1e-9).log10();
+    let peak_dbfs = 20.0 * peak.max(1e-9).log10();
+    Ok(AudioProbe {
+        rms_dbfs,
+        peak_dbfs,
+        silent: rms_dbfs < -50.0,
+    })
+}
+
 /// Читает WAV и считает RMS/peak в dBFS.
 fn read_probe(path: &Path) -> Result<AudioProbe, AudioError> {
     let mut reader = hound::WavReader::open(path)
@@ -511,5 +558,29 @@ mod tests {
     fn probes_microphone() {
         let probe = LinuxAudioRecorder::probe(None, AudioDeviceKind::Mic).expect("probe");
         assert!(probe.rms_dbfs.is_finite());
+    }
+
+    /// Проверяет расчёт уровня по WAV с синусоидой.
+    #[test]
+    fn reads_wav_levels() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tone.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).expect("wav");
+        for index in 0..48_000 {
+            let value = (index as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin();
+            writer
+                .write_sample((value * 0.5 * i16::MAX as f32) as i16)
+                .expect("sample");
+        }
+        writer.finalize().expect("finalize");
+        let probe = read_levels(&path).expect("levels");
+        assert!(!probe.silent);
+        assert!(probe.rms_dbfs > -20.0);
     }
 }

@@ -8,8 +8,9 @@ pub mod paths;
 
 pub use audio::{
     AudioDevice, AudioDeviceKind, AudioError, AudioProbe, AudioStart, LinuxAudioRecorder,
+    read_levels,
 };
 pub use capture::{CaptureError, WaylandPortalRecorder, X11VideoRecorder};
-pub use media::{ExportRequest, MediaError, merge_recording};
+pub use media::{ExportRequest, MediaError, merge_audio, merge_recording};
 pub use models::{DownloadProgress, MODELS, ModelError, ModelManager, ModelSpec};
 pub use paths::{PathError, Paths};

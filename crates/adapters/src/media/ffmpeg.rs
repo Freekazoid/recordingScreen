@@ -13,6 +13,9 @@ pub enum MediaError {
     #[error("нет видеодорожки для экспорта")]
     NoVideo,
 
+    #[error("нет аудиодорожки для экспорта")]
+    NoAudio,
+
     #[error("файл не найден: {0}")]
     Missing(PathBuf),
 
@@ -74,6 +77,72 @@ pub fn merge_recording(request: &ExportRequest) -> Result<PathBuf, MediaError> {
         ));
     }
     Ok(request.output.clone())
+}
+
+/// Сводит только аудиодорожки в WAV (режим «Только аудио»).
+pub fn merge_audio(
+    system_audio: Option<PathBuf>,
+    mic_audio: Option<PathBuf>,
+    output: &Path,
+) -> Result<PathBuf, MediaError> {
+    if system_audio.is_none() && mic_audio.is_none() {
+        return Err(MediaError::NoAudio);
+    }
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| MediaError::CreateDir {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let mut args = vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "warning".to_string(),
+        "-nostdin".to_string(),
+        "-y".to_string(),
+    ];
+    let mut inputs = Vec::new();
+    if let Some(system) = &system_audio {
+        if !system.exists() {
+            return Err(MediaError::Missing(system.clone()));
+        }
+        args.push("-i".to_string());
+        args.push(system.to_string_lossy().to_string());
+        inputs.push(0);
+    }
+    if let Some(mic) = &mic_audio {
+        if !mic.exists() {
+            return Err(MediaError::Missing(mic.clone()));
+        }
+        args.push("-i".to_string());
+        args.push(mic.to_string_lossy().to_string());
+        inputs.push(if system_audio.is_some() { 1 } else { 0 });
+    }
+    if inputs.len() >= 2 {
+        args.extend([
+            "-filter_complex".to_string(),
+            format!(
+                "[{}:a][{}:a]amix=inputs=2:normalize=0:duration=longest[aout]",
+                inputs[0], inputs[1]
+            ),
+            "-map".to_string(),
+            "[aout]".to_string(),
+        ]);
+    }
+    args.extend([
+        "-c:a".to_string(),
+        "pcm_s16le".to_string(),
+        "-y".to_string(),
+        output.to_string_lossy().to_string(),
+    ]);
+    let result = Command::new("ffmpeg").args(&args).output()?;
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        return Err(MediaError::Ffmpeg(
+            stderr.lines().rev().take(8).collect::<Vec<_>>().join(" | "),
+        ));
+    }
+    Ok(output.to_path_buf())
 }
 
 /// Собирает аргументы ffmpeg для экспорта.
