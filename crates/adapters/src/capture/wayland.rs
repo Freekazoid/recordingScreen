@@ -25,6 +25,9 @@ pub enum PortalSource {
     Window,
 }
 
+/// Сообщение, когда пользователь закрыл диалог портала без подтверждения.
+pub const PORTAL_CANCELLED: &str = "доступ к экрану не предоставлен";
+
 /// Рекордер Wayland-экрана через портал.
 #[derive(Debug, Default)]
 pub struct WaylandPortalRecorder {
@@ -82,7 +85,7 @@ impl WaylandPortalRecorder {
                 }
             };
 
-            let portal = runtime.block_on(open_portal(source));
+            let portal = runtime.block_on(open_portal(source, &stop_rx));
             let (proxy, session, fd, node_id, stream_size) = match portal {
                 Ok(portal) => portal,
                 Err(error) => {
@@ -91,8 +94,9 @@ impl WaylandPortalRecorder {
                 }
             };
             // Пользователь мог нажать «Остановить», пока висел диалог портала.
-            if stop_rx.try_recv().is_ok() {
+            if stop_requested(&stop_rx) {
                 let _ = start_tx.send(Err("остановлено пользователем".to_string()));
+                close_portal_session(&runtime, &session);
                 return;
             }
 
@@ -100,6 +104,7 @@ impl WaylandPortalRecorder {
             // GStreamer должен унаследовать fd, поэтому снимаем CLOEXEC.
             if unsafe { libc::fcntl(raw_fd, libc::F_SETFD, 0) } == -1 {
                 let _ = start_tx.send(Err("не удалось подготовить PipeWire fd".to_string()));
+                close_portal_session(&runtime, &session);
                 return;
             }
 
@@ -107,6 +112,7 @@ impl WaylandPortalRecorder {
                 Ok(child) => child,
                 Err(error) => {
                     let _ = start_tx.send(Err(error));
+                    close_portal_session(&runtime, &session);
                     return;
                 }
             };
@@ -121,13 +127,14 @@ impl WaylandPortalRecorder {
                     *slot = Some(message.clone());
                 }
                 let _ = start_tx.send(Err(message));
+                close_portal_session(&runtime, &session);
                 return;
             }
             worker_active.store(true, Ordering::SeqCst);
             let _ = start_tx.send(Ok(()));
 
             loop {
-                if stop_rx.try_recv().is_ok() {
+                if stop_requested(&stop_rx) {
                     break;
                 }
                 if let Ok(Some(status)) = child.try_wait() {
@@ -141,8 +148,8 @@ impl WaylandPortalRecorder {
             }
             let _ = stop_process(&mut child);
             worker_active.store(false, Ordering::SeqCst);
+            close_portal_session(&runtime, &session);
             drop(fd);
-            drop(session);
             drop(proxy);
         });
 
@@ -245,6 +252,7 @@ impl Drop for WaylandPortalRecorder {
 /// Открывает портал и получает PipeWire FD + node id.
 async fn open_portal(
     source: PortalSource,
+    stop_rx: &Receiver<()>,
 ) -> Result<(Screencast, Session<Screencast>, OwnedFd, u32, (u32, u32)), String> {
     let proxy = Screencast::new()
         .await
@@ -253,13 +261,63 @@ async fn open_portal(
         .create_session(Default::default())
         .await
         .map_err(|error| format!("CreateSession: {error}"))?;
+    // Портал может не ответить (зависший диалог, другой ScreenCast-сеанс).
+    // Таймаут обязателен, иначе worker остаётся в ожидании навсегда.
+    // Остановку проверяем прямо во время диалога, чтобы не копить
+    // зависшие запросы и не блокировать следующий запуск.
+    let stream = tokio::select! {
+        result = tokio::time::timeout(
+            Duration::from_secs(60),
+            start_stream(&proxy, &session, source),
+        ) => result,
+        () = wait_for_stop(stop_rx) => {
+            let _ = tokio::time::timeout(Duration::from_secs(2), session.close()).await;
+            return Err("остановлено пользователем".to_string());
+        }
+    };
+    match stream {
+        Ok(Ok((fd, node_id, stream_size))) => Ok((proxy, session, fd, node_id, stream_size)),
+        Ok(Err(error)) => {
+            let _ = tokio::time::timeout(Duration::from_secs(2), session.close()).await;
+            Err(error)
+        }
+        Err(_) => {
+            let _ = tokio::time::timeout(Duration::from_secs(2), session.close()).await;
+            Err("таймаут ожидания портала (60 с)".to_string())
+        }
+    }
+}
+
+/// Асинхронно ждёт сигнал остановки от UI.
+async fn wait_for_stop(stop_rx: &Receiver<()>) {
+    loop {
+        if stop_requested(stop_rx) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Закрывает портальную сессию, не дожидаясь зависшего портала.
+fn close_portal_session(runtime: &tokio::runtime::Runtime, session: &Session<Screencast>) {
+    runtime.block_on(async {
+        let _ = tokio::time::timeout(Duration::from_secs(2), session.close()).await;
+    });
+}
+
+/// Запрашивает источник у портала и открывает PipeWire-поток.
+async fn start_stream(
+    proxy: &Screencast,
+    session: &Session<Screencast>,
+    source: PortalSource,
+) -> Result<(OwnedFd, u32, (u32, u32)), String> {
     let source_type = match source {
         PortalSource::Monitor => SourceType::Monitor,
         PortalSource::Window => SourceType::Window,
     };
     proxy
         .select_sources(
-            &session,
+            session,
             SelectSourcesOptions::default()
                 .set_cursor_mode(CursorMode::Embedded)
                 .set_sources(ashpd::enumflags2::BitFlags::from(source_type))
@@ -269,11 +327,16 @@ async fn open_portal(
         .await
         .map_err(|error| format!("SelectSources: {error}"))?;
     let response = proxy
-        .start(&session, None, Default::default())
+        .start(session, None, Default::default())
         .await
         .map_err(|error| format!("Start: {error}"))?
         .response()
-        .map_err(|error| format!("Start response: {error}"))?;
+        .map_err(|error| match error {
+            ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => {
+                PORTAL_CANCELLED.to_string()
+            }
+            error => format!("Start response: {error}"),
+        })?;
     let stream: &Stream = response
         .streams()
         .first()
@@ -281,10 +344,21 @@ async fn open_portal(
     let node_id = stream.pipe_wire_node_id();
     let stream_size = stream.size().map_or((0, 0), |(w, h)| (w as u32, h as u32));
     let fd = proxy
-        .open_pipe_wire_remote(&session, Default::default())
+        .open_pipe_wire_remote(session, Default::default())
         .await
         .map_err(|error| format!("OpenPipeWireRemote: {error}"))?;
-    Ok((proxy, session, fd, node_id, stream_size))
+    Ok((fd, node_id, stream_size))
+}
+
+/// Проверяет, просили ли воркер остановиться.
+///
+/// Закрытый канал тоже считается остановкой: `force_reset` мог уронить
+/// отправителя, пока воркер ещё висел в диалоге портала.
+fn stop_requested(stop_rx: &Receiver<()>) -> bool {
+    match stop_rx.try_recv() {
+        Ok(()) | Err(mpsc::TryRecvError::Disconnected) => true,
+        Err(mpsc::TryRecvError::Empty) => false,
+    }
 }
 
 /// Запускает GStreamer-пайплайн записи PipeWire в MKV.
@@ -445,5 +519,20 @@ mod tests {
         assert!(args.contains(&"top=50".to_string()));
         assert!(args.contains(&"right=1020".to_string()));
         assert!(args.contains(&"bottom=430".to_string()));
+    }
+
+    /// Проверяет, что закрытый канал остановки трактуется как отмена.
+    #[test]
+    fn disconnected_stop_channel_cancels_worker() {
+        let (sender, receiver) = mpsc::channel::<()>();
+        drop(sender);
+        assert!(stop_requested(&receiver));
+    }
+
+    /// Проверяет, что пустой канал не считается остановкой.
+    #[test]
+    fn empty_stop_channel_keeps_worker_running() {
+        let (_sender, receiver) = mpsc::channel::<()>();
+        assert!(!stop_requested(&receiver));
     }
 }

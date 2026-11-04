@@ -32,12 +32,18 @@ fn take_screenshot_wayland(output: &Path) -> Result<PathBuf, String> {
     })?;
     let raw_fd = fd.as_raw_fd();
     if unsafe { libc::fcntl(raw_fd, libc::F_SETFD, 0) } == -1 {
+        close_screenshot_session(&runtime, &session);
         return Err("не удалось подготовить PipeWire fd".to_string());
     }
     let log_path = output.with_extension("gst.log");
-    let log = std::fs::File::create(&log_path)
-        .map_err(|error| format!("лог GStreamer {}: {error}", log_path.display()))?;
-    let mut child = Command::new("gst-launch-1.0")
+    let log = match std::fs::File::create(&log_path) {
+        Ok(log) => log,
+        Err(error) => {
+            close_screenshot_session(&runtime, &session);
+            return Err(format!("лог GStreamer {}: {error}", log_path.display()));
+        }
+    };
+    let mut child = match Command::new("gst-launch-1.0")
         .args([
             "-e",
             "pipewiresrc",
@@ -58,7 +64,13 @@ fn take_screenshot_wayland(output: &Path) -> Result<PathBuf, String> {
         .stdout(Stdio::null())
         .stderr(Stdio::from(log))
         .spawn()
-        .map_err(|error| format!("gst-launch-1.0: {error}"))?;
+    {
+        Ok(child) => child,
+        Err(error) => {
+            close_screenshot_session(&runtime, &session);
+            return Err(format!("gst-launch-1.0: {error}"));
+        }
+    };
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -69,13 +81,19 @@ fn take_screenshot_wayland(output: &Path) -> Result<PathBuf, String> {
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                close_screenshot_session(&runtime, &session);
                 return Err("таймаут получения кадра (8 с)".to_string());
             }
-            Err(error) => return Err(format!("ожидание gst: {error}")),
+            Err(error) => {
+                close_screenshot_session(&runtime, &session);
+                return Err(format!("ожидание gst: {error}"));
+            }
         }
     };
+    // Портальная сессия должна закрываться сразу: иначе следующий запрос
+    // ScreenCast (например, для записи области) повисает без диалога.
+    close_screenshot_session(&runtime, &session);
     drop(fd);
-    drop(session);
     drop(proxy);
 
     if !status.success() {
@@ -90,6 +108,13 @@ fn take_screenshot_wayland(output: &Path) -> Result<PathBuf, String> {
         return Err("GStreamer не создал PNG".to_string());
     }
     Ok(output.to_path_buf())
+}
+
+/// Закрывает портальную сессию, не дожидаясь зависшего портала.
+fn close_screenshot_session(runtime: &tokio::runtime::Runtime, session: &Session<Screencast>) {
+    runtime.block_on(async {
+        let _ = tokio::time::timeout(Duration::from_secs(2), session.close()).await;
+    });
 }
 
 /// Открывает ScreenCast-портал и возвращает поток.
@@ -117,7 +142,12 @@ async fn open_stream() -> Result<(Screencast, Session<Screencast>, OwnedFd, u32)
         .await
         .map_err(|error| format!("Start: {error}"))?
         .response()
-        .map_err(|error| format!("Start response: {error}"))?;
+        .map_err(|error| match error {
+            ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => {
+                crate::capture::wayland::PORTAL_CANCELLED.to_string()
+            }
+            error => format!("Start response: {error}"),
+        })?;
     let stream = response
         .streams()
         .first()

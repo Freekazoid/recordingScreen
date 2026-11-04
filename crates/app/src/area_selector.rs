@@ -154,16 +154,7 @@ impl eframe::App for AreaSelector {
                     .round()
                     .max(0.0) as u32;
                 self.finish(ui, x, y, width, height);
-                return;
             }
         }
-
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "Выделите область мышью · Esc — отмена",
-            egui::FontId::proportional(18.0),
-            egui::Color32::from_rgb(0xcc, 0xca, 0xca),
-        );
     }
 }

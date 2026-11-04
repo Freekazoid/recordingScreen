@@ -8,7 +8,7 @@ pub mod wayland;
 pub mod x11;
 
 pub use screenshot::take_screenshot;
-pub use wayland::{PortalSource, WaylandPortalRecorder};
+pub use wayland::{PORTAL_CANCELLED, PortalSource, WaylandPortalRecorder};
 pub use x11::{CaptureError, WindowInfo, X11VideoRecorder, list_windows};
 
 /// Прямоугольная область экрана в физических пикселях.

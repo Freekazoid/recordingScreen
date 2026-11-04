@@ -11,8 +11,8 @@ pub use audio::{
     read_levels,
 };
 pub use capture::{
-    CaptureError, PortalSource, Region, WaylandPortalRecorder, WindowInfo, X11VideoRecorder,
-    list_windows, take_screenshot,
+    CaptureError, PORTAL_CANCELLED, PortalSource, Region, WaylandPortalRecorder, WindowInfo,
+    X11VideoRecorder, list_windows, take_screenshot,
 };
 pub use media::{ExportRequest, MediaError, merge_audio, merge_recording};
 pub use models::{DownloadProgress, MODELS, ModelError, ModelManager, ModelSpec};

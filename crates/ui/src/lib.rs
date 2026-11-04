@@ -12,8 +12,8 @@ use eframe::egui::{
 };
 use screenrecorder_adapters::{
     AudioDevice, AudioDeviceKind, AudioProbe, DownloadProgress, ExportRequest, LinuxAudioRecorder,
-    ModelManager, Paths, PortalSource, Region, WaylandPortalRecorder, WindowInfo, X11VideoRecorder,
-    list_windows, merge_audio, merge_recording, read_levels, take_screenshot,
+    ModelManager, PORTAL_CANCELLED, Paths, PortalSource, Region, WaylandPortalRecorder, WindowInfo,
+    X11VideoRecorder, list_windows, merge_audio, merge_recording, read_levels, take_screenshot,
 };
 use screenrecorder_application::{Settings, SettingsStore};
 use screenrecorder_domain::SessionId;
@@ -316,30 +316,63 @@ impl ScreenRecorderApp {
             self.status = "Не удалось определить путь к приложению".to_string();
             return;
         };
+        let cache_dir = self.paths.cache_dir.clone();
+        let _ = std::fs::create_dir_all(&cache_dir);
+        let cached_image = cache_dir.join("area-screenshot.png");
+        // Снимок сохраняется между запусками: портал запрашивается один раз,
+        // а не при каждом выборе области. Обновить можно в настройках.
+        let use_cache = std::fs::metadata(&cached_image).is_ok_and(|meta| meta.len() > 0);
+        let cache_target = cached_image.clone();
+
         let stamp = Local::now().format("%s%f");
-        let image = std::env::temp_dir().join(format!("screenrecorder-area-{stamp}.png"));
+        let image = if use_cache {
+            cached_image
+        } else {
+            cache_dir.join(format!("area-screenshot-{stamp}.png"))
+        };
         let out = std::env::temp_dir().join(format!("screenrecorder-area-{stamp}.txt"));
+        let screenshot_needed = !use_cache;
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
-            let result = take_screenshot(&image).and_then(|_| {
+            let result = (|| {
+                if screenshot_needed {
+                    take_screenshot(&image)?;
+                    let _ = std::fs::copy(&image, &cache_target);
+                }
                 let status = Command::new(exe)
                     .arg("--select-area")
                     .arg(&image)
                     .arg(&out)
                     .status()
                     .map_err(|error| format!("окно выбора: {error}"))?;
+                // Временный снимок нужен только окну выбора.
+                if screenshot_needed {
+                    let _ = std::fs::remove_file(&image);
+                    let _ = std::fs::remove_file(image.with_extension("gst.log"));
+                }
                 if !status.success() {
                     return Err(format!("выбор области завершился: {status}"));
                 }
-                let text = std::fs::read_to_string(&out)
-                    .map_err(|error| format!("результат выбора: {error}"))?;
+                let text = match std::fs::read_to_string(&out) {
+                    Ok(text) => text,
+                    Err(_) => return Err("область не выбрана".to_string()),
+                };
+                let _ = std::fs::remove_file(&out);
                 parse_region(&text)
-            });
+            })();
             let _ = sender.send(result);
         });
         self.area_rx = Some(receiver);
-        self.status = "Выбор области экрана…".to_string();
-        self.log = "Выделите область в полноэкранном окне.".to_string();
+        self.status = if use_cache {
+            "Выбор области (сохранённый снимок)…".to_string()
+        } else {
+            "Снимок экрана для выбора области…".to_string()
+        };
+        self.log = if use_cache {
+            "Использую сохранённый снимок области. Обновить его можно в настройках.".to_string()
+        } else {
+            "Снимок экрана сохранён для следующих выборов области.".to_string()
+        };
     }
 
     /// Забирает результат выбора области.
@@ -357,6 +390,14 @@ impl ScreenRecorderApp {
         self.area_rx = None;
         match result {
             Ok(region) => self.start_region_recording(region, "Область экрана"),
+            Err(error) if error == "область не выбрана" => {
+                self.status = "Выбор области отменён".to_string();
+                self.log = "Область не выбрана.".to_string();
+            }
+            Err(error) if error == PORTAL_CANCELLED => {
+                self.status = "Снимок экрана отменён".to_string();
+                self.log = "Диалог доступа к экрану закрыт без подтверждения.".to_string();
+            }
             Err(error) => {
                 self.status = format!("Область не выбрана: {error}");
                 self.log = format!("Выбор области: {error}");
@@ -552,6 +593,7 @@ impl ScreenRecorderApp {
             return;
         }
         let was_wayland_pending = self.wayland_pending;
+        let was_wayland_active = self.using_wayland && self.wayland_recorder.is_running();
         self.recording = false;
         self.wayland_pending = false;
         self.recording_mode = None;
@@ -564,7 +606,7 @@ impl ScreenRecorderApp {
         let video_result: Result<(), String> = if audio_only {
             Ok(())
         } else if self.using_wayland {
-            if was_wayland_pending {
+            if was_wayland_pending && !was_wayland_active {
                 self.wayland_recorder.request_stop();
                 Ok(())
             } else {
@@ -579,9 +621,13 @@ impl ScreenRecorderApp {
             .as_ref()
             .map(|dir| dir.display().to_string())
             .unwrap_or_else(|| "каталог сессии".to_string());
-        if was_wayland_pending {
-            self.status = "Запись отменена".to_string();
-            self.log = "Ожидание портала прервано; запись не началась.".to_string();
+        if was_wayland_pending && !was_wayland_active {
+            // Остановка кнопкой, а не Esc: просто сообщаем, что запись не
+            // успела начаться и файла ещё нет.
+            self.status = "Запись остановлена".to_string();
+            self.log = format!(
+                "Остановлено до подтверждения доступа к экрану; файл записи может отсутствовать: {dir}"
+            );
             return;
         }
         match (video_result, audio_result) {
@@ -747,8 +793,13 @@ impl ScreenRecorderApp {
                         self.using_wayland = false;
                         self.recording_mode = None;
                         let _ = self.wayland_recorder.stop();
-                        self.status = format!("Ошибка Wayland: {error}");
-                        self.log = format!("Портал не запустил запись: {error}");
+                        if error == PORTAL_CANCELLED {
+                            self.status = "Доступ к экрану не предоставлен".to_string();
+                            self.log = "Диалог портала закрыт без подтверждения.".to_string();
+                        } else {
+                            self.status = format!("Ошибка Wayland: {error}");
+                            self.log = format!("Портал не запустил запись: {error}");
+                        }
                     }
                 }
             }
@@ -1336,6 +1387,14 @@ impl ScreenRecorderApp {
                         .changed()
                     {
                         self.settings_dirty = true;
+                    }
+
+                    ui.add_space(4.0);
+                    if ui.button("Обновить снимок области").clicked() {
+                        let snapshot = self.paths.cache_dir.join("area-screenshot.png");
+                        let _ = std::fs::remove_file(snapshot);
+                        self.log =
+                            "Снимок области будет обновлён при следующем выборе.".to_string();
                     }
                 });
 
