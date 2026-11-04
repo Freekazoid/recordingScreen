@@ -292,7 +292,9 @@ impl ScreenRecorderApp {
     /// Создаёт иконку в системном трее.
     fn init_tray(&mut self) {
         let icon = match image::load_from_memory(include_bytes!("../../../assets/icon.png")) {
-            Ok(image) => image.to_rgba8(),
+            Ok(image) => image
+                .resize(64, 64, image::imageops::FilterType::Lanczos3)
+                .to_rgba8(),
             Err(error) => {
                 self.log = format!("Трей: иконка недоступна: {error}");
                 return;
