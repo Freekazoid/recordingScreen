@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use super::PortalSource;
+use super::portal_token;
+
 /// Делает снимок экрана: ScreenCast на Wayland, ffmpeg на X11.
 pub fn take_screenshot(output: &Path) -> Result<PathBuf, String> {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
@@ -126,6 +129,9 @@ async fn open_stream() -> Result<(Screencast, Session<Screencast>, OwnedFd, u32)
         .create_session(Default::default())
         .await
         .map_err(|error| format!("CreateSession: {error}"))?;
+    // Снимок использует тот же restore-token, что и запись монитора:
+    // после первого подтверждения портал не показывает диалог повторно.
+    let restore_token = portal_token::load(PortalSource::Monitor);
     let stream = async {
         proxy
             .select_sources(
@@ -134,7 +140,8 @@ async fn open_stream() -> Result<(Screencast, Session<Screencast>, OwnedFd, u32)
                     .set_cursor_mode(CursorMode::Embedded)
                     .set_sources(ashpd::enumflags2::BitFlags::from(SourceType::Monitor))
                     .set_multiple(false)
-                    .set_persist_mode(PersistMode::DoNot),
+                    .set_persist_mode(Some(PersistMode::ExplicitlyRevoked))
+                    .set_restore_token(restore_token.as_deref()),
             )
             .await
             .map_err(|error| format!("SelectSources: {error}"))?;
@@ -149,6 +156,9 @@ async fn open_stream() -> Result<(Screencast, Session<Screencast>, OwnedFd, u32)
                 }
                 error => format!("Start response: {error}"),
             })?;
+        // Токен одноразовый: без сохранения нового следующий снимок снова
+        // потребует диалог.
+        portal_token::save(PortalSource::Monitor, response.restore_token());
         let stream = response
             .streams()
             .first()

@@ -5,6 +5,7 @@
 //! в MKV. Остановка — SIGINT, чтобы GStreamer корректно закрыл файл.
 
 use super::Region;
+use super::portal_token;
 use ashpd::desktop::screencast::{
     CursorMode, Screencast, SelectSourcesOptions, SourceType, Stream,
 };
@@ -315,6 +316,17 @@ async fn start_stream(
         PortalSource::Monitor => SourceType::Monitor,
         PortalSource::Window => SourceType::Window,
     };
+    // Для монитора сохраняем разрешение: тогда GNOME не показывает диалог
+    // при каждом запуске. Для окна токен не используем — пользователь
+    // каждый раз выбирает нужное окно.
+    let restore_token = match source {
+        PortalSource::Monitor => portal_token::load(source),
+        PortalSource::Window => None,
+    };
+    let persist_mode = match source {
+        PortalSource::Monitor => Some(PersistMode::ExplicitlyRevoked),
+        PortalSource::Window => Some(PersistMode::DoNot),
+    };
     proxy
         .select_sources(
             session,
@@ -322,7 +334,8 @@ async fn start_stream(
                 .set_cursor_mode(CursorMode::Embedded)
                 .set_sources(ashpd::enumflags2::BitFlags::from(source_type))
                 .set_multiple(false)
-                .set_persist_mode(PersistMode::DoNot),
+                .set_persist_mode(persist_mode)
+                .set_restore_token(restore_token.as_deref()),
         )
         .await
         .map_err(|error| format!("SelectSources: {error}"))?;
@@ -337,6 +350,11 @@ async fn start_stream(
             }
             error => format!("Start response: {error}"),
         })?;
+    // Токен одноразовый: сохраняем новый, иначе следующий запуск снова
+    // покажет диалог.
+    if source == PortalSource::Monitor {
+        portal_token::save(source, response.restore_token());
+    }
     let stream: &Stream = response
         .streams()
         .first()

@@ -7,6 +7,8 @@ pub mod screenshot;
 pub mod wayland;
 pub mod x11;
 
+mod portal_token;
+
 pub use screenshot::take_screenshot;
 pub use wayland::{PORTAL_CANCELLED, PortalSource, WaylandPortalRecorder};
 pub use x11::{CaptureError, WindowInfo, X11VideoRecorder, list_windows};
