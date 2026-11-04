@@ -137,4 +137,40 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         concat_segments(&dir.path().join("screen.mkv")).expect("concat");
     }
+
+    /// Проверяет восстановление сегментов после «падения».
+    #[test]
+    #[ignore = "требует ffmpeg"]
+    fn recovers_segments_after_crash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session = dir.path().join("session");
+        std::fs::create_dir_all(&session).expect("mkdir");
+        for index in 0..2 {
+            let output = session.join(format!("screen-{index:03}.mkv"));
+            let status = Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc=size=160x120:rate=10",
+                    "-t",
+                    "1",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    &output.to_string_lossy(),
+                ])
+                .status()
+                .expect("ffmpeg");
+            assert!(status.success());
+        }
+        let (recovered, errors) = recover_all_segments(dir.path());
+        assert_eq!(recovered, 1, "{errors:?}");
+        assert!(session.join("screen.mkv").exists());
+    }
 }
