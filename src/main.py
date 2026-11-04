@@ -41,8 +41,21 @@ def _cleanup_temp_dirs():
                 pass
 
 
+def _set_process_name(name="ScreenRecorder"):
+    """Переименовывает процесс (PR_SET_NAME), чтобы системные мониторы не путали его с другими python-процессами."""
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(15, name.encode(), 0, 0, 0)
+    except Exception:
+        pass
+
+
 def main():
     """Точка входа приложения: настраивает окружение, идентичность на Wayland, иконку и запускает главное окно."""
+    _set_process_name()
+
     # Дочерние процессы не должны видеть библиотеки бандла в LD_LIBRARY_PATH
     # (иначе системные утилиты вроде systemd-run падают по версиям символов).
     from proc_env import install_subprocess_guard
