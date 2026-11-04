@@ -5,6 +5,7 @@ pub mod capture;
 pub mod media;
 pub mod models;
 pub mod paths;
+mod portal;
 
 pub use audio::{
     AudioDevice, AudioDeviceKind, AudioError, AudioProbe, AudioStart, LinuxAudioRecorder,

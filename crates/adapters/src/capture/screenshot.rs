@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use super::PortalSource;
 use super::portal_token;
+use crate::portal;
 
 /// Делает снимок экрана: ScreenCast на Wayland, ffmpeg на X11.
 pub fn take_screenshot(output: &Path) -> Result<PathBuf, String> {
@@ -122,7 +123,8 @@ fn close_screenshot_session(runtime: &tokio::runtime::Runtime, session: &Session
 
 /// Открывает ScreenCast-портал и возвращает поток.
 async fn open_stream() -> Result<(Screencast, Session<Screencast>, OwnedFd, u32), String> {
-    let proxy = Screencast::new()
+    let connection = portal::connect().await?;
+    let proxy = Screencast::with_connection(connection)
         .await
         .map_err(|error| format!("Screencast: {error}"))?;
     let session = proxy

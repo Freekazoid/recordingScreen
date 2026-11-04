@@ -6,6 +6,7 @@
 
 use super::Region;
 use super::portal_token;
+use crate::portal;
 use ashpd::desktop::screencast::{
     CursorMode, Screencast, SelectSourcesOptions, SourceType, Stream,
 };
@@ -255,7 +256,8 @@ async fn open_portal(
     source: PortalSource,
     stop_rx: &Receiver<()>,
 ) -> Result<(Screencast, Session<Screencast>, OwnedFd, u32, (u32, u32)), String> {
-    let proxy = Screencast::new()
+    let connection = portal::connect().await?;
+    let proxy = Screencast::with_connection(connection)
         .await
         .map_err(|error| format!("Screencast: {error}"))?;
     let session = proxy
