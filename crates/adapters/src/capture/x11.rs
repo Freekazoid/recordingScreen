@@ -391,6 +391,27 @@ mod tests {
         assert!(size > 0, "файл записи пустой");
     }
 
+    /// Проверяет ротацию сегментов на длинной записи; запускать вручную.
+    #[test]
+    #[ignore = "требует X11, ffmpeg и 65 секунд"]
+    fn records_x11_segment_rotation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("screen.mkv");
+        let mut recorder = X11VideoRecorder::new();
+        recorder.start(&output, 10).expect("старт записи");
+        std::thread::sleep(std::time::Duration::from_secs(65));
+        recorder.stop().expect("остановка записи");
+        assert!(output.exists(), "итоговый файл не создан");
+        assert!(
+            !dir.path()
+                .read_dir()
+                .expect("read_dir")
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().contains("-00")),
+            "сегменты не удалены после склейки"
+        );
+    }
+
     /// Проверяет перечисление окон X11; запускать вручную.
     #[test]
     #[ignore = "требует X11 и xprop/xwininfo"]
