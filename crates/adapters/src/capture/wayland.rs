@@ -54,6 +54,7 @@ impl WaylandPortalRecorder {
         source: PortalSource,
         crop: Option<Region>,
     ) -> Result<(), String> {
+        self.clear_finished();
         if self.worker.is_some() {
             return Err("Wayland-запись уже запущена".to_string());
         }
@@ -170,15 +171,34 @@ impl WaylandPortalRecorder {
         self.active.load(Ordering::SeqCst)
     }
 
+    /// Убирает завершившийся worker, чтобы можно было начать заново.
+    pub fn clear_finished(&mut self) {
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+        {
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+            self.start_rx = None;
+            self.stop_tx = None;
+            self.active.store(false, Ordering::SeqCst);
+        }
+    }
+
     /// Останавливает запись и закрывает портальную сессию.
     pub fn stop(&mut self) -> Result<(), String> {
         if let Some(sender) = self.stop_tx.take() {
             let _ = sender.send(());
         }
         if let Some(worker) = self.worker.take() {
-            worker
+            let result = worker
                 .join()
-                .map_err(|_| "поток Wayland-записи завершился с ошибкой".to_string())?;
+                .map_err(|_| "поток Wayland-записи завершился с ошибкой".to_string());
+            self.start_rx = None;
+            self.active.store(false, Ordering::SeqCst);
+            return result;
         }
         self.start_rx = None;
         self.active.store(false, Ordering::SeqCst);

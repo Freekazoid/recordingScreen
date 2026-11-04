@@ -723,6 +723,7 @@ impl ScreenRecorderApp {
                     Err(error) => {
                         self.recording = false;
                         self.using_wayland = false;
+                        let _ = self.wayland_recorder.stop();
                         self.status = format!("Ошибка Wayland: {error}");
                         self.log = format!("Портал не запустил запись: {error}");
                     }
@@ -750,6 +751,10 @@ impl ScreenRecorderApp {
                 }
                 if let Some(session_dir) = self.session_dir.clone() {
                     self.start_export(&session_dir, audio_only);
+                }
+                if self.using_wayland {
+                    let _ = self.wayland_recorder.stop();
+                    self.using_wayland = false;
                 }
             }
         }
