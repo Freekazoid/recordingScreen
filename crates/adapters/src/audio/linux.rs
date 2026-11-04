@@ -193,6 +193,9 @@ fn parse_devices(value: &Value) -> Vec<AudioDevice> {
         return devices;
     };
     for object in objects {
+        let Some(id) = object.get("id").and_then(Value::as_u64) else {
+            continue;
+        };
         let Some(props) = object
             .get("info")
             .and_then(|info| info.get("props"))
@@ -215,18 +218,17 @@ fn parse_devices(value: &Value) -> Vec<AudioDevice> {
                 push_device(
                     &mut devices,
                     AudioDevice {
-                        id: name.to_string(),
+                        id: id.to_string(),
                         label: description.to_string(),
                         kind: AudioDeviceKind::Mic,
                     },
                 );
             }
             "Audio/Sink" => {
-                let id = format!("{name}.monitor");
                 push_device(
                     &mut devices,
                     AudioDevice {
-                        id,
+                        id: id.to_string(),
                         label: format!("{description} (системный)"),
                         kind: AudioDeviceKind::System,
                     },
@@ -305,14 +307,7 @@ fn resolve_target(target: Option<&str>, kind: AudioDeviceKind) -> Result<String,
     }
     match kind {
         AudioDeviceKind::Mic => default_node("@DEFAULT_AUDIO_SOURCE@", "source"),
-        AudioDeviceKind::System => {
-            let sink = default_node("@DEFAULT_AUDIO_SINK@", "sink")?;
-            Ok(if sink.ends_with(".monitor") {
-                sink
-            } else {
-                format!("{sink}.monitor")
-            })
-        }
+        AudioDeviceKind::System => default_node("@DEFAULT_AUDIO_SINK@", "sink"),
     }
 }
 
@@ -400,13 +395,12 @@ fn default_node(target: &str, kind: &str) -> Result<String, AudioError> {
     {
         let text = String::from_utf8_lossy(&output.stdout);
         for line in text.lines() {
-            let line = line.trim().trim_start_matches('*').trim();
-            if let Some(rest) = line.strip_prefix("node.name = ")
-                && let Some(name) = rest
-                    .strip_prefix('"')
-                    .and_then(|value| value.strip_suffix('"'))
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("id ")
+                && let Some(id) = rest.split(',').next()
+                && !id.trim().is_empty()
             {
-                return Ok(name.to_string());
+                return Ok(id.trim().to_string());
             }
         }
     }
@@ -478,15 +472,16 @@ mod tests {
     fn parses_devices() {
         let value: Value = serde_json::from_str(
             r#"[
-                {"info":{"props":{"media.class":"Audio/Source","node.name":"mic","node.description":"Микрофон"}}},
-                {"info":{"props":{"media.class":"Audio/Sink","node.name":"speakers","node.description":"Колонки"}}}
+                {"id":1,"info":{"props":{"media.class":"Audio/Source","node.name":"mic","node.description":"Микрофон"}}},
+                {"id":2,"info":{"props":{"media.class":"Audio/Sink","node.name":"speakers","node.description":"Колонки"}}}
             ]"#,
         )
         .expect("json");
         let devices = parse_devices(&value);
         assert_eq!(devices.len(), 2);
         assert_eq!(devices[0].kind, AudioDeviceKind::Mic);
-        assert_eq!(devices[1].id, "speakers.monitor");
+        assert_eq!(devices[0].id, "1");
+        assert_eq!(devices[1].id, "2");
     }
 
     /// Проверяет, что имя узла не пустое в текущем окружении.
