@@ -1965,10 +1965,12 @@ impl ScreenRecorderApp {
     fn draw_settings(&mut self, ui: &mut egui::Ui) {
         let whisper_ready = self.model_manager.is_downloaded("whisper");
         let diarization_ready = self.model_manager.is_downloaded("diarization");
+        let vad_ready = self.model_manager.is_downloaded("vad");
         let whisper_progress =
             (self.download_model == Some("whisper")).then_some(self.download_progress);
         let diarization_progress =
             (self.download_model == Some("diarization")).then_some(self.download_progress);
+        let vad_progress = (self.download_model == Some("vad")).then_some(self.download_progress);
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -1993,6 +1995,16 @@ impl ScreenRecorderApp {
                         "sherpa-onnx · сегментация + эмбеддинги",
                     ) {
                         requested = Some("diarization");
+                    }
+                    ui.add_space(4.0);
+                    if Self::model_row(
+                        ui,
+                        "Silero VAD",
+                        vad_ready,
+                        vad_progress,
+                        "silero-v5.1.2 · whisper.cpp",
+                    ) {
+                        requested = Some("vad");
                     }
                 });
                 if let Some(id) = requested {
