@@ -774,7 +774,7 @@ impl ScreenRecorderApp {
             let color = if ready { GREEN } else { RED };
             ui.painter().circle_filled(rect.center(), 9.0, color);
             ui.add_space(4.0);
-            ui.label(RichText::new(&self.status).size(14.0).color(TEXT));
+            ui.add(egui::Label::new(RichText::new(&self.status).size(14.0).color(TEXT)).wrap());
         });
     }
 
