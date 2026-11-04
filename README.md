@@ -62,10 +62,12 @@ Vosk и PyAnnote в v4 не поддерживаются; упоминания �
 - ASR whisper-rs с VAD, таймкодами, прогрессом, отменой и экспортом
   TXT/MD/SRT/VTT/JSON.
 - Копии транскриптов сохраняются рядом с экспортированным видео.
-- Channel-aware транскрипция system/mic; диаризация sherpa-onnx или NeMo.
+- Channel-aware транскрипция system/mic; диаризация sherpa-onnx или NeMo
+  с метками `спикер_1…спикер_n`.
 - SQLite-история сессий и задач; удаление записи из истории.
 - Трей с отдельными режимами записи и горячими клавишами Ctrl+Shift+1…5,
-  системные уведомления.
+  системные уведомления. Крестик окна сворачивает приложение в трей;
+  полное закрытие — только через пункт «Выход» в трее.
 - На вкладке «Запись» вместо текстового журнала — только текущее состояние
   с подробным описанием. Для ML показывается процент и кнопка отмены.
 - Сохранение доступа ScreenCast через restore-token (без повторного диалога).
@@ -87,6 +89,21 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+Живые проверки, которым нужен реальный экран/звук:
+
+```bash
+# Эталонный клип и измерение A/V sync
+./scripts/make_av_sync_clip.sh testdata/av-sync/av-sync-test.mp4
+./scripts/check_av_sync.sh ~/Видео/ScreenRecorder/<запись>.mkv
+
+# Ручной 30-минутный soak (X11 + ffmpeg)
+cargo test -p screenrecorder-adapters records_x11_30_minutes -- --ignored --nocapture
+```
+
+Протокол A/V sync, требования к multi-monitor/HiDPI и форматы корпусов
+WER/DER описаны в `docs/05-av-sync-test.md`, `docs/06-multi-monitor-hidpi.md`
+и `docs/07-wer-der.md`.
 
 ---
 

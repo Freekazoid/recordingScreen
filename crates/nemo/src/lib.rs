@@ -86,7 +86,7 @@ impl NemoDiarizer {
             .map(|segment| SpeakerTurn {
                 start_ms: segment.start.saturating_mul(1000) / 16_000,
                 end_ms: segment.end.saturating_mul(1000) / 16_000,
-                speaker: format!("SPEAKER_{:02}", segment.speaker_id + 1),
+                speaker: format!("спикер_{}", segment.speaker_id + 1),
             })
             .collect())
     }

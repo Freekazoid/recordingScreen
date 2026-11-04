@@ -33,7 +33,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 use tray_icon::{
     TrayIcon, TrayIconBuilder,
-    menu::{Menu, MenuEvent, MenuId, MenuItem},
+    menu::{Menu, MenuEvent, MenuId, MenuItem, accelerator::Accelerator},
 };
 
 /// Результат фоновой загрузки модели.
@@ -182,8 +182,10 @@ pub struct ScreenRecorderApp {
     tray_stop_item: Option<MenuItem>,
     tray_commands: Vec<(MenuId, TrayCommand)>,
     tray_recording_state: Option<bool>,
+    last_tray_command: Option<(TrayCommand, Instant)>,
     hotkey_manager: Option<GlobalHotKeyManager>,
     hotkey_bindings: Vec<(u32, TrayCommand)>,
+    allow_close: bool,
 }
 
 impl ScreenRecorderApp {
@@ -294,8 +296,10 @@ impl ScreenRecorderApp {
             tray_stop_item: None,
             tray_commands: Vec::new(),
             tray_recording_state: None,
+            last_tray_command: None,
             hotkey_manager: None,
             hotkey_bindings: Vec::new(),
+            allow_close: false,
         };
         app.init_tray();
         app.init_hotkeys();
@@ -322,12 +326,14 @@ impl ScreenRecorderApp {
             }
         };
         let menu = Menu::new();
+        let modifier = Modifiers::CONTROL | Modifiers::SHIFT;
+        let accelerator = |code| Some(Accelerator::new(modifier, code));
         let status = MenuItem::new("Статус: готово", false, None);
-        let full = MenuItem::new("Весь экран — Ctrl+Shift+1", true, None);
-        let area = MenuItem::new("Область экрана — Ctrl+Shift+2", true, None);
-        let program = MenuItem::new("Программа — Ctrl+Shift+3", true, None);
-        let audio = MenuItem::new("Только аудио — Ctrl+Shift+4", true, None);
-        let stop = MenuItem::new("Остановить запись — Ctrl+Shift+5", false, None);
+        let full = MenuItem::new("Весь экран", true, accelerator(Code::Digit1));
+        let area = MenuItem::new("Область экрана", true, accelerator(Code::Digit2));
+        let program = MenuItem::new("Программа", true, accelerator(Code::Digit3));
+        let audio = MenuItem::new("Только аудио", true, accelerator(Code::Digit4));
+        let stop = MenuItem::new("Остановить запись", false, accelerator(Code::Digit5));
         let show = MenuItem::new("Показать", true, None);
         let quit = MenuItem::new("Выход", true, None);
 
@@ -431,9 +437,23 @@ impl ScreenRecorderApp {
 
     /// Выполняет команду трея или горячей клавиши.
     fn execute_tray_command(&mut self, command: TrayCommand, ctx: &egui::Context) {
+        if let Some((last, at)) = self.last_tray_command
+            && last == command
+            && at.elapsed() < Duration::from_millis(300)
+        {
+            return;
+        }
+        self.last_tray_command = Some((command, Instant::now()));
         match command {
-            TrayCommand::Show => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
-            TrayCommand::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            TrayCommand::Show => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            TrayCommand::Quit => {
+                self.allow_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
             TrayCommand::Stop => {
                 if self.recording {
                     self.stop_recording();
@@ -2330,7 +2350,8 @@ impl ScreenRecorderApp {
         }
     }
 
-    /// Рисует строку модели в настройках.
+    /// Рисует строку модели: слева текст с переносом, справа фиксированная
+    /// колонка статуса и действия, чтобы все строки были выровнены.
     fn model_row(
         ui: &mut egui::Ui,
         title: &str,
@@ -2338,16 +2359,28 @@ impl ScreenRecorderApp {
         progress: Option<f32>,
         description: &str,
     ) -> Option<ModelAction> {
+        /// Ширина правой колонки со статусом и кнопкой.
+        const ACTIONS_WIDTH: f32 = 150.0;
         let mut action = None;
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(Vec2::new(20.0, 20.0), Sense::hover());
             ui.painter()
                 .circle_filled(rect.center(), 5.0, if ready { GREEN } else { RED });
-            ui.vertical(|ui| {
-                ui.label(RichText::new(title).color(TEXT));
-                ui.label(RichText::new(description).size(11.0).color(HINT));
-            });
+            let text_width = (ui.available_width() - ACTIONS_WIDTH - 8.0).max(120.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(text_width, 0.0),
+                Layout::top_down(Align::LEFT),
+                |ui| {
+                    ui.set_width(text_width);
+                    ui.label(RichText::new(title).color(TEXT));
+                    // Описание переносится по словам и не обрезается справа.
+                    ui.add(
+                        egui::Label::new(RichText::new(description).size(11.0).color(HINT)).wrap(),
+                    );
+                },
+            );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.set_min_width(ACTIONS_WIDTH);
                 if ready {
                     ui.label(RichText::new("Готово").color(GREEN));
                     if ui.button("Удалить").clicked() {
@@ -3165,24 +3198,53 @@ impl ScreenRecorderApp {
             );
         });
     }
-}
 
-impl eframe::App for ScreenRecorderApp {
-    /// Обновляет интерфейс на каждом кадре.
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    /// Обрабатывает фоновые события и команды.
+    ///
+    /// Вызывается и при скрытом окне, поэтому запись, очередь и трей
+    /// продолжают работать после сворачивания. Здесь же обрабатывается
+    /// крестик окна: без трея приложение закрывается штатно, с треем —
+    /// скрывается, а полное закрытие доступно только через «Выход».
+    fn tick(&mut self, ctx: &egui::Context) {
+        if ctx.input(|input| input.viewport().close_requested()) && !self.allow_close {
+            if self.tray.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                notify("Screen Recorder", "Приложение свёрнуто в трей");
+            } else {
+                // Если трей не создался, скрывать окно нельзя: пользователь
+                // не сможет вернуть приложение.
+                self.allow_close = true;
+            }
+        }
         self.poll_recording();
         self.poll_preflight();
         self.poll_transcription();
         self.poll_ml_progress();
         self.poll_job_queue();
-        self.poll_tray(ui.ctx());
-        self.poll_hotkeys(ui.ctx());
+        self.poll_tray(ctx);
+        self.poll_hotkeys(ctx);
         self.sync_tray_state();
         self.poll_download();
         self.poll_folder_picker();
         self.poll_probe();
         self.poll_area();
         self.poll_export();
+        self.persist_settings();
+        if !self.hotkey_bindings.is_empty() || self.tray.is_some() || self.recording {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
+    }
+}
+
+impl eframe::App for ScreenRecorderApp {
+    /// Обрабатывает события до отрисовки, в том числе при скрытом окне.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.tick(ctx);
+    }
+
+    /// Обновляет интерфейс на каждом кадре.
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BG).inner_margin(Margin::same(5)))
             .show(ui, |ui| {
@@ -3197,10 +3259,6 @@ impl eframe::App for ScreenRecorderApp {
             });
         self.window_picker(ui.ctx());
         self.delete_window(ui.ctx());
-        self.persist_settings();
-        if !self.hotkey_bindings.is_empty() || self.tray.is_some() {
-            ui.ctx().request_repaint_after(Duration::from_millis(200));
-        }
     }
 }
 
@@ -3517,7 +3575,7 @@ mod tests {
                 start_ms: 1_500,
                 end_ms: 3_000,
                 text: "привет".to_string(),
-                speaker: Some("SPEAKER_01".to_string()),
+                speaker: Some("спикер_1".to_string()),
             }],
         }
     }
@@ -3527,7 +3585,7 @@ mod tests {
     fn formats_srt() {
         let text = format_srt(&sample());
         assert!(text.contains("00:00:01,500 --> 00:00:03,000"));
-        assert!(text.contains("SPEAKER_01: привет"));
+        assert!(text.contains("спикер_1: привет"));
     }
 
     /// Проверяет формат WebVTT.
@@ -3543,7 +3601,7 @@ mod tests {
     fn formats_markdown() {
         let text = format_markdown(&sample());
         assert!(text.starts_with("# Транскрипт"));
-        assert!(text.contains("**SPEAKER_01** привет"));
+        assert!(text.contains("**спикер_1** привет"));
     }
 
     /// Проверяет разбор области.

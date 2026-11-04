@@ -129,7 +129,7 @@ impl SherpaDiarizationEngine {
             .map(|segment| SpeakerTurn {
                 start_ms: (segment.start.max(0.0) * 1000.0) as u64,
                 end_ms: (segment.end.max(0.0) * 1000.0) as u64,
-                speaker: format!("SPEAKER_{:02}", segment.speaker.max(0) + 1),
+                speaker: format!("спикер_{}", segment.speaker.max(0) + 1),
             })
             .collect();
         unsafe {

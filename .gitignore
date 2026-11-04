@@ -16,6 +16,7 @@ test/
 .temp_segments/
 
 # Артефакты тестов и записи
+testdata/av-sync/
 audio.wav
 output.mkv
 test_*.wav
