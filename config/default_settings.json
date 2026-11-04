@@ -10,10 +10,12 @@
     "audio_channels": 2
   },
   "transcription": {
+    "enabled": true,
     "engine": "whisper-rs",
     "model": "large-v3-turbo",
     "language": "auto",
-    "vad": "sherpa-onnx"
+    "vad": "sherpa-onnx",
+    "compute_device": "auto"
   },
   "diarization": {
     "engine": "sherpa-onnx",

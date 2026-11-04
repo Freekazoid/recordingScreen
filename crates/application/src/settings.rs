@@ -69,20 +69,24 @@ impl Default for CaptureSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TranscriptionSettings {
+    pub enabled: bool,
     pub engine: String,
     pub model: String,
     pub language: String,
     pub vad: String,
+    pub compute_device: String,
 }
 
 impl Default for TranscriptionSettings {
     /// Возвращает параметры ASR по умолчанию.
     fn default() -> Self {
         Self {
+            enabled: true,
             engine: "whisper-rs".to_string(),
             model: "large-v3-turbo".to_string(),
             language: "auto".to_string(),
             vad: "sherpa-onnx".to_string(),
+            compute_device: "auto".to_string(),
         }
     }
 }
@@ -242,6 +246,15 @@ impl Settings {
             return Err(SettingsError::InvalidField {
                 field: "transcription.language".to_string(),
                 reason: "язык не может быть пустым".to_string(),
+            });
+        }
+        if !matches!(
+            self.transcription.compute_device.as_str(),
+            "auto" | "cpu" | "gpu"
+        ) {
+            return Err(SettingsError::InvalidField {
+                field: "transcription.compute_device".to_string(),
+                reason: "допустимо auto, cpu или gpu".to_string(),
             });
         }
         if !matches!(self.diarization.engine.as_str(), "sherpa-onnx" | "none") {
