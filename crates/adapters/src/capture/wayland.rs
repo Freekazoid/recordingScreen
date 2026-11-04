@@ -417,15 +417,17 @@ fn build_gst_args(
         "!".to_string(),
     ];
     if let (Some(region), (stream_w, stream_h)) = (crop, stream_size)
-        && stream_w > 0
-        && stream_h > 0
+        && stream_w > 1
+        && stream_h > 1
         && region.width > 0
         && region.height > 0
     {
-        let left = region.x.min(stream_w.saturating_sub(1));
-        let top = region.y.min(stream_h.saturating_sub(1));
-        let width = region.width.min(stream_w.saturating_sub(left));
-        let height = region.height.min(stream_h.saturating_sub(top));
+        // I420 требует чётные ширину и высоту, иначе x264enc может
+        // отказаться запускать конвейер. Округляем область вниз.
+        let left = region.x.min(stream_w - 2) & !1;
+        let top = region.y.min(stream_h - 2) & !1;
+        let width = (region.width.min(stream_w - left) & !1).max(2);
+        let height = (region.height.min(stream_h - top) & !1).max(2);
         let right = stream_w.saturating_sub(left + width);
         let bottom = stream_h.saturating_sub(top + height);
         args.extend([
@@ -515,6 +517,28 @@ mod tests {
             (1920, 1080),
         );
         assert!(args.contains(&"videocrop".to_string()));
+        assert!(args.contains(&"left=100".to_string()));
+        assert!(args.contains(&"top=50".to_string()));
+        assert!(args.contains(&"right=1020".to_string()));
+        assert!(args.contains(&"bottom=430".to_string()));
+    }
+
+    /// Проверяет, что нечётная область округляется до чётных размеров.
+    #[test]
+    fn rounds_odd_crop_to_even() {
+        let args = build_gst_args(
+            7,
+            42,
+            Path::new("/tmp/out.mkv"),
+            20,
+            Some(Region {
+                x: 101,
+                y: 51,
+                width: 801,
+                height: 601,
+            }),
+            (1920, 1080),
+        );
         assert!(args.contains(&"left=100".to_string()));
         assert!(args.contains(&"top=50".to_string()));
         assert!(args.contains(&"right=1020".to_string()));
