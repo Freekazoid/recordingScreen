@@ -412,6 +412,20 @@ mod tests {
         );
     }
 
+    /// Проверяет 30-минутную запись; запускать вручную.
+    #[test]
+    #[ignore = "30-минутный soak; требует X11 и ffmpeg"]
+    fn records_x11_30_minutes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("screen.mkv");
+        let mut recorder = X11VideoRecorder::new();
+        recorder.start(&output, 10).expect("старт записи");
+        std::thread::sleep(std::time::Duration::from_secs(30 * 60));
+        recorder.stop().expect("остановка записи");
+        let size = std::fs::metadata(&output).expect("файл записи").len();
+        assert!(size > 1_000_000, "файл слишком маленький: {size}");
+    }
+
     /// Проверяет перечисление окон X11; запускать вручную.
     #[test]
     #[ignore = "требует X11 и xprop/xwininfo"]
