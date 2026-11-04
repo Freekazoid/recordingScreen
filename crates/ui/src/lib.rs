@@ -39,6 +39,7 @@ struct TranscriptOutput {
     json_path: PathBuf,
     srt_path: PathBuf,
     vtt_path: PathBuf,
+    md_path: PathBuf,
     segments: usize,
     language: String,
     warning: Option<String>,
@@ -1185,6 +1186,7 @@ impl ScreenRecorderApp {
                 let json_path = dir.join("transcript.json");
                 let srt_path = dir.join("transcript.srt");
                 let vtt_path = dir.join("transcript.vtt");
+                let md_path = dir.join("transcript.md");
                 std::fs::write(&text_path, format_transcript(&transcript))
                     .map_err(|error| format!("запись {}: {error}", text_path.display()))?;
                 let json = serde_json::to_string_pretty(&transcript)
@@ -1195,11 +1197,14 @@ impl ScreenRecorderApp {
                     .map_err(|error| format!("запись {}: {error}", srt_path.display()))?;
                 std::fs::write(&vtt_path, format_vtt(&transcript))
                     .map_err(|error| format!("запись {}: {error}", vtt_path.display()))?;
+                std::fs::write(&md_path, format_markdown(&transcript))
+                    .map_err(|error| format!("запись {}: {error}", md_path.display()))?;
                 Ok(TranscriptOutput {
                     text_path,
                     json_path,
                     srt_path,
                     vtt_path,
+                    md_path,
                     segments: transcript.segments.len(),
                     language: transcript.language,
                     warning,
@@ -1233,11 +1238,12 @@ impl ScreenRecorderApp {
             Ok(output) => {
                 self.status = "Транскрипция готова".to_string();
                 self.log = format!(
-                    "Текст: {} · JSON: {} · SRT: {} · VTT: {} ({} сегментов, язык {}){}",
+                    "Текст: {} · JSON: {} · SRT: {} · VTT: {} · MD: {} ({} сегментов, язык {}){}",
                     output.text_path.display(),
                     output.json_path.display(),
                     output.srt_path.display(),
                     output.vtt_path.display(),
+                    output.md_path.display(),
                     output.segments,
                     output.language,
                     output
@@ -1932,13 +1938,18 @@ impl ScreenRecorderApp {
                             ui.label(RichText::new(error).size(11.0).color(RED));
                         }
                         ui.horizontal(|ui| {
+                            if let Some(export) = &record.export_path
+                                && ui.button("Открыть видео").clicked()
+                            {
+                                open_path(export);
+                            }
+                            if let Some(transcript) = &record.transcript_path
+                                && ui.button("Открыть текст").clicked()
+                            {
+                                open_path(transcript);
+                            }
                             if ui.button("Открыть папку").clicked() {
-                                let _ = Command::new("xdg-open")
-                                    .arg(&record.output_dir)
-                                    .stdin(std::process::Stdio::null())
-                                    .stdout(std::process::Stdio::null())
-                                    .stderr(std::process::Stdio::null())
-                                    .spawn();
+                                open_path(&record.output_dir);
                             }
                             if ui.button("Копировать путь").clicked() {
                                 ui.ctx().copy_text(record.output_dir.clone());
@@ -2219,6 +2230,16 @@ impl eframe::App for ScreenRecorderApp {
     }
 }
 
+/// Открывает файл или каталог системным обработчиком.
+fn open_path(path: &str) {
+    let _ = Command::new("xdg-open")
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 /// Переводит состояние истории в русскую подпись.
 fn state_label(state: &str) -> &'static str {
     match state {
@@ -2231,6 +2252,25 @@ fn state_label(state: &str) -> &'static str {
         "cancelled" => "Отменено",
         _ => "Неизвестно",
     }
+}
+
+/// Форматирует транскрипт в Markdown.
+fn format_markdown(transcript: &Transcript) -> String {
+    let mut output = format!("# Транскрипт\n\nЯзык: {}\n\n", transcript.language);
+    for segment in &transcript.segments {
+        let speaker = segment
+            .speaker
+            .as_deref()
+            .map(|speaker| format!("**{speaker}** "))
+            .unwrap_or_default();
+        output.push_str(&format!(
+            "- [{} - {}] {speaker}{}\n",
+            format_ms(segment.start_ms),
+            format_ms(segment.end_ms),
+            segment.text.trim()
+        ));
+    }
+    output
 }
 
 /// Форматирует транскрипт в SRT.
@@ -2455,6 +2495,14 @@ mod tests {
         let text = format_vtt(&sample());
         assert!(text.starts_with("WEBVTT"));
         assert!(text.contains("00:00:01.500 --> 00:00:03.000"));
+    }
+
+    /// Проверяет Markdown-экспорт.
+    #[test]
+    fn formats_markdown() {
+        let text = format_markdown(&sample());
+        assert!(text.starts_with("# Транскрипт"));
+        assert!(text.contains("**SPEAKER_01** привет"));
     }
 
     /// Проверяет разбор области.
