@@ -12,12 +12,13 @@ use eframe::egui::{
 };
 use screenrecorder_adapters::{
     AudioDevice, AudioDeviceKind, AudioProbe, DownloadProgress, ExportRequest, LinuxAudioRecorder,
-    ModelManager, Paths, WaylandPortalRecorder, X11VideoRecorder, merge_audio, merge_recording,
-    read_levels,
+    ModelManager, Paths, PortalSource, Region, WaylandPortalRecorder, WindowInfo, X11VideoRecorder,
+    list_windows, merge_audio, merge_recording, read_levels, take_screenshot,
 };
 use screenrecorder_application::{Settings, SettingsStore};
 use screenrecorder_domain::SessionId;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -87,6 +88,9 @@ pub struct ScreenRecorderApp {
     mic_dbfs: f32,
     system_dbfs: f32,
     last_levels: Instant,
+    area_rx: Option<Receiver<Result<Region, String>>>,
+    window_list: Vec<WindowInfo>,
+    show_windows: bool,
 }
 
 impl ScreenRecorderApp {
@@ -127,6 +131,9 @@ impl ScreenRecorderApp {
             mic_dbfs: -90.0,
             system_dbfs: -90.0,
             last_levels: Instant::now(),
+            area_rx: None,
+            window_list: Vec::new(),
+            show_windows: false,
         }
     }
 
@@ -297,6 +304,155 @@ impl ScreenRecorderApp {
         }
     }
 
+    /// Запускает выбор области через полноэкранный скриншот.
+    fn start_area_selection(&mut self) {
+        if self.area_rx.is_some() {
+            self.log = "Выбор области уже открыт.".to_string();
+            return;
+        }
+        let Ok(exe) = std::env::current_exe() else {
+            self.status = "Не удалось определить путь к приложению".to_string();
+            return;
+        };
+        let stamp = Local::now().format("%s%f");
+        let image = std::env::temp_dir().join(format!("screenrecorder-area-{stamp}.png"));
+        let out = std::env::temp_dir().join(format!("screenrecorder-area-{stamp}.txt"));
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = take_screenshot(&image).and_then(|_| {
+                let status = Command::new(exe)
+                    .arg("--select-area")
+                    .arg(&image)
+                    .arg(&out)
+                    .status()
+                    .map_err(|error| format!("окно выбора: {error}"))?;
+                if !status.success() {
+                    return Err(format!("выбор области завершился: {status}"));
+                }
+                let text = std::fs::read_to_string(&out)
+                    .map_err(|error| format!("результат выбора: {error}"))?;
+                parse_region(&text)
+            });
+            let _ = sender.send(result);
+        });
+        self.area_rx = Some(receiver);
+        self.status = "Выбор области экрана…".to_string();
+        self.log = "Выделите область в полноэкранном окне.".to_string();
+    }
+
+    /// Забирает результат выбора области.
+    fn poll_area(&mut self) {
+        let result = match &self.area_rx {
+            Some(receiver) => match receiver.try_recv() {
+                Ok(result) => result,
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    Err("поток выбора области завершился".to_string())
+                }
+            },
+            None => return,
+        };
+        self.area_rx = None;
+        match result {
+            Ok(region) => self.start_region_recording(region),
+            Err(error) => {
+                self.status = format!("Область не выбрана: {error}");
+                self.log = format!("Выбор области: {error}");
+            }
+        }
+    }
+
+    /// Запускает запись выбранной области.
+    fn start_region_recording(&mut self, region: Region) {
+        let session_id = SessionId::new();
+        let session_dir = self.paths.session_dir(session_id.as_str());
+        let output = session_dir.join("screen.mkv");
+        self.audio_only = false;
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            match self.wayland_recorder.start_with_source(
+                &output,
+                self.settings.capture.fps,
+                PortalSource::Monitor,
+                Some(region),
+            ) {
+                Ok(()) => {
+                    self.using_wayland = true;
+                    self.wayland_pending = true;
+                    self.recording = true;
+                    self.audio_offset_ms = 0;
+                    self.session_dir = Some(session_dir);
+                    self.status = "Wayland: ожидание доступа к области…".to_string();
+                }
+                Err(error) => {
+                    self.status = format!("Ошибка области: {error}");
+                    self.log = error;
+                }
+            }
+            return;
+        }
+        match self
+            .recorder
+            .start_region(&output, self.settings.capture.fps, Some(region))
+        {
+            Ok(()) => {
+                let started = Instant::now();
+                self.using_wayland = false;
+                self.wayland_pending = false;
+                self.start_audio(&session_dir);
+                self.audio_offset_ms = started.elapsed().as_millis() as i64;
+                self.recording = true;
+                self.session_dir = Some(session_dir);
+                self.status = format!("Идёт запись области {}×{}", region.width, region.height);
+            }
+            Err(error) => {
+                self.status = format!("Ошибка области: {error}");
+            }
+        }
+    }
+
+    /// Запускает выбор программы/окна.
+    fn start_program_selection(&mut self) {
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            let session_id = SessionId::new();
+            let session_dir = self.paths.session_dir(session_id.as_str());
+            let output = session_dir.join("screen.mkv");
+            self.audio_only = false;
+            match self.wayland_recorder.start_with_source(
+                &output,
+                self.settings.capture.fps,
+                PortalSource::Window,
+                None,
+            ) {
+                Ok(()) => {
+                    self.using_wayland = true;
+                    self.wayland_pending = true;
+                    self.recording = true;
+                    self.audio_offset_ms = 0;
+                    self.session_dir = Some(session_dir);
+                    self.status = "Wayland: выбор окна…".to_string();
+                }
+                Err(error) => {
+                    self.status = format!("Ошибка выбора окна: {error}");
+                }
+            }
+            return;
+        }
+
+        match list_windows() {
+            Ok(windows) if !windows.is_empty() => {
+                self.window_list = windows;
+                self.show_windows = true;
+                self.status = "Выберите программу".to_string();
+            }
+            Ok(_) => {
+                self.status = "Не найдено видимых окон".to_string();
+            }
+            Err(error) => {
+                self.status = format!("Список окон: {error}");
+            }
+        }
+    }
+
     /// Запускает или останавливает запись экрана.
     fn toggle_recording(&mut self, mode: &str) {
         if self.recording {
@@ -323,6 +479,15 @@ impl ScreenRecorderApp {
                 self.audio_only = false;
                 self.status = "Не удалось начать запись звука".to_string();
             }
+            return;
+        }
+
+        if mode == "Область экрана" {
+            self.start_area_selection();
+            return;
+        }
+        if mode == "Программа" {
+            self.start_program_selection();
             return;
         }
 
@@ -823,6 +988,45 @@ impl ScreenRecorderApp {
         clicked
     }
 
+    /// Показывает список X11-окон для выбора «Программа».
+    fn window_picker(&mut self, ctx: &egui::Context) {
+        if !self.show_windows {
+            return;
+        }
+        let mut selected = None;
+        let mut close = false;
+        egui::Window::new("Выбор программы")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                if self.window_list.is_empty() {
+                    ui.label("Нет доступных окон.");
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            for window in &self.window_list {
+                                if ui.selectable_label(false, &window.title).clicked() {
+                                    selected = Some(window.region);
+                                    close = true;
+                                }
+                            }
+                        });
+                }
+                ui.add_space(6.0);
+                if ui.button("Отмена").clicked() {
+                    close = true;
+                }
+            });
+        if close {
+            self.show_windows = false;
+        }
+        if let Some(region) = selected {
+            self.start_region_recording(region);
+        }
+    }
+
     /// Рисует вкладку «Запись».
     fn draw_record(&mut self, ui: &mut egui::Ui) {
         self.status_row(ui);
@@ -864,7 +1068,7 @@ impl ScreenRecorderApp {
             )
             .clicked()
             {
-                self.log = "Режим «Область экрана» будет добавлен на этапе 2.".to_string();
+                self.toggle_recording("Область экрана");
             }
             ui.add_space(8.0);
             if Self::record_button(
@@ -876,7 +1080,7 @@ impl ScreenRecorderApp {
             )
             .clicked()
             {
-                self.log = "Режим «Программа» будет добавлен на этапе 2.".to_string();
+                self.toggle_recording("Программа");
             }
             ui.add_space(8.0);
             if Self::record_button(
@@ -1203,6 +1407,7 @@ impl eframe::App for ScreenRecorderApp {
         self.poll_download();
         self.poll_folder_picker();
         self.poll_probe();
+        self.poll_area();
         self.poll_export();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BG).inner_margin(Margin::same(5)))
@@ -1215,8 +1420,28 @@ impl eframe::App for ScreenRecorderApp {
                     Screen::About => self.draw_about(ui),
                 }
             });
+        self.window_picker(ui.ctx());
         self.persist_settings();
     }
+}
+
+/// Разбирает `x,y,w,h` из файла выбора области.
+fn parse_region(text: &str) -> Result<Region, String> {
+    let parts: Vec<&str> = text.trim().split(',').collect();
+    if parts.len() != 4 {
+        return Err("область не выбрана".to_string());
+    }
+    let numbers: Result<Vec<u32>, _> = parts.iter().map(|part| part.parse::<u32>()).collect();
+    let numbers = numbers.map_err(|error| format!("координаты области: {error}"))?;
+    if numbers[2] < 2 || numbers[3] < 2 {
+        return Err("слишком маленькая область".to_string());
+    }
+    Ok(Region {
+        x: numbers[0],
+        y: numbers[1],
+        width: numbers[2],
+        height: numbers[3],
+    })
 }
 
 /// Возвращает CRF по подписи из интерфейса.

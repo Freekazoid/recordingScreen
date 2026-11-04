@@ -3182,6 +3182,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "ureq",
+ "url",
 ]
 
 [[package]]
@@ -3189,6 +3190,8 @@ name = "screenrecorder-app"
 version = "4.0.0-alpha.1"
 dependencies = [
  "anyhow",
+ "eframe",
+ "image",
  "screenrecorder-adapters",
  "screenrecorder-application",
  "screenrecorder-ui",

@@ -20,13 +20,14 @@ authors = ["Freekazoid"]
 
 [workspace.dependencies]
 anyhow = "1"
-ashpd = { version = "0.13", features = ["screencast"] }
+ashpd = { version = "0.13", features = ["screencast", "screenshot"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6"
 dirs = "6"
 eframe = "0.37"
 egui = "0.37"
 hound = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }
 libc = "0.2"
 rfd = "0.17"
 serde = { version = "1", features = ["derive"] }
@@ -37,6 +38,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 ureq = "2.12"
+url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [profile.release]

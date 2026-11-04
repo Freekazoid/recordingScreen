@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+eframe.workspace = true
+image.workspace = true
 screenrecorder-adapters = { path = "../adapters" }
 screenrecorder-application = { path = "../application" }
 screenrecorder-ui = { path = "../ui" }

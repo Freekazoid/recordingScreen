@@ -1,12 +1,15 @@
 //! Точка входа Screen Recorder 4.0.
 //!
-//! Поддерживает `--version` и `--diagnose` для проверки окружения без
-//! запуска графического интерфейса.
+//! Поддерживает `--version`, `--diagnose` и `--select-area` для проверки
+//! окружения и выбора области.
+
+mod area_selector;
 
 use anyhow::Context;
 use screenrecorder_adapters::Paths;
 use screenrecorder_application::SettingsStore;
 use serde_json::json;
+use std::path::Path;
 use tracing_subscriber::EnvFilter;
 
 /// Инициализирует структурное логирование в stderr.
@@ -64,6 +67,15 @@ fn main() -> anyhow::Result<()> {
     }
     if args.iter().any(|arg| arg == "--diagnose") {
         return print_diagnostics();
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "--select-area") {
+        let image = args
+            .get(index + 1)
+            .context("--select-area: не указан путь к скриншоту")?;
+        let out = args
+            .get(index + 2)
+            .context("--select-area: не указан файл результата")?;
+        return area_selector::run(Path::new(image), Path::new(out));
     }
 
     let paths = Paths::discover().context("не удалось определить каталоги приложения")?;

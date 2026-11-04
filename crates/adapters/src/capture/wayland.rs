@@ -4,6 +4,7 @@
 //! PipeWire FD запускается `gst-launch-1.0` с `pipewiresrc`; запись идёт
 //! в MKV. Остановка — SIGINT, чтобы GStreamer корректно закрыл файл.
 
+use super::Region;
 use ashpd::desktop::screencast::{
     CursorMode, Screencast, SelectSourcesOptions, SourceType, Stream,
 };
@@ -16,6 +17,13 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+/// Что выбирает пользователь в портале.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortalSource {
+    Monitor,
+    Window,
+}
 
 /// Рекордер Wayland-экрана через портал.
 #[derive(Debug, Default)]
@@ -35,6 +43,17 @@ impl WaylandPortalRecorder {
 
     /// Запускает портал в фоне; результат доступен через `take_start_result`.
     pub fn start(&mut self, output: &Path, fps: u32) -> Result<(), String> {
+        self.start_with_source(output, fps, PortalSource::Monitor, None)
+    }
+
+    /// Запускает портал с выбором монитора/окна и необязательной обрезкой.
+    pub fn start_with_source(
+        &mut self,
+        output: &Path,
+        fps: u32,
+        source: PortalSource,
+        crop: Option<Region>,
+    ) -> Result<(), String> {
         if self.worker.is_some() {
             return Err("Wayland-запись уже запущена".to_string());
         }
@@ -58,8 +77,8 @@ impl WaylandPortalRecorder {
                 }
             };
 
-            let portal = runtime.block_on(open_portal());
-            let (proxy, session, fd, node_id) = match portal {
+            let portal = runtime.block_on(open_portal(source));
+            let (proxy, session, fd, node_id, stream_size) = match portal {
                 Ok(portal) => portal,
                 Err(error) => {
                     let _ = start_tx.send(Err(error));
@@ -74,7 +93,7 @@ impl WaylandPortalRecorder {
                 return;
             }
 
-            let child = match spawn_gst(raw_fd, node_id, &output, fps) {
+            let child = match spawn_gst(raw_fd, node_id, &output, fps, crop, stream_size) {
                 Ok(child) => child,
                 Err(error) => {
                     let _ = start_tx.send(Err(error));
@@ -175,7 +194,9 @@ impl Drop for WaylandPortalRecorder {
 }
 
 /// Открывает портал и получает PipeWire FD + node id.
-async fn open_portal() -> Result<(Screencast, Session<Screencast>, OwnedFd, u32), String> {
+async fn open_portal(
+    source: PortalSource,
+) -> Result<(Screencast, Session<Screencast>, OwnedFd, u32, (u32, u32)), String> {
     let proxy = Screencast::new()
         .await
         .map_err(|error| format!("Screencast: {error}"))?;
@@ -183,12 +204,16 @@ async fn open_portal() -> Result<(Screencast, Session<Screencast>, OwnedFd, u32)
         .create_session(Default::default())
         .await
         .map_err(|error| format!("CreateSession: {error}"))?;
+    let source_type = match source {
+        PortalSource::Monitor => SourceType::Monitor,
+        PortalSource::Window => SourceType::Window,
+    };
     proxy
         .select_sources(
             &session,
             SelectSourcesOptions::default()
                 .set_cursor_mode(CursorMode::Embedded)
-                .set_sources(SourceType::Monitor | SourceType::Window)
+                .set_sources(ashpd::enumflags2::BitFlags::from(source_type))
                 .set_multiple(false)
                 .set_persist_mode(PersistMode::DoNot),
         )
@@ -205,16 +230,24 @@ async fn open_portal() -> Result<(Screencast, Session<Screencast>, OwnedFd, u32)
         .first()
         .ok_or_else(|| "портал не вернул поток".to_string())?;
     let node_id = stream.pipe_wire_node_id();
+    let stream_size = stream.size().map_or((0, 0), |(w, h)| (w as u32, h as u32));
     let fd = proxy
         .open_pipe_wire_remote(&session, Default::default())
         .await
         .map_err(|error| format!("OpenPipeWireRemote: {error}"))?;
-    Ok((proxy, session, fd, node_id))
+    Ok((proxy, session, fd, node_id, stream_size))
 }
 
 /// Запускает GStreamer-пайплайн записи PipeWire в MKV.
-fn spawn_gst(fd: i32, node_id: u32, output: &Path, fps: u32) -> Result<Child, String> {
-    let args = build_gst_args(fd, node_id, output, fps);
+fn spawn_gst(
+    fd: i32,
+    node_id: u32,
+    output: &Path,
+    fps: u32,
+    crop: Option<Region>,
+    stream_size: (u32, u32),
+) -> Result<Child, String> {
+    let args = build_gst_args(fd, node_id, output, fps, crop, stream_size);
     let log_path = output.with_extension("gst.log");
     let log = std::fs::File::create(&log_path)
         .map_err(|error| format!("лог GStreamer {}: {error}", log_path.display()))?;
@@ -239,8 +272,15 @@ fn read_tail(path: &Path) -> String {
 }
 
 /// Собирает аргументы `gst-launch-1.0`.
-fn build_gst_args(fd: i32, node_id: u32, output: &Path, fps: u32) -> Vec<String> {
-    vec![
+fn build_gst_args(
+    fd: i32,
+    node_id: u32,
+    output: &Path,
+    fps: u32,
+    crop: Option<Region>,
+    stream_size: (u32, u32),
+) -> Vec<String> {
+    let mut args = vec![
         "-e".to_string(),
         "pipewiresrc".to_string(),
         format!("fd={fd}"),
@@ -252,6 +292,29 @@ fn build_gst_args(fd: i32, node_id: u32, output: &Path, fps: u32) -> Vec<String>
         "!".to_string(),
         "videoconvert".to_string(),
         "!".to_string(),
+    ];
+    if let (Some(region), (stream_w, stream_h)) = (crop, stream_size)
+        && stream_w > 0
+        && stream_h > 0
+        && region.width > 0
+        && region.height > 0
+    {
+        let left = region.x.min(stream_w.saturating_sub(1));
+        let top = region.y.min(stream_h.saturating_sub(1));
+        let width = region.width.min(stream_w.saturating_sub(left));
+        let height = region.height.min(stream_h.saturating_sub(top));
+        let right = stream_w.saturating_sub(left + width);
+        let bottom = stream_h.saturating_sub(top + height);
+        args.extend([
+            "videocrop".to_string(),
+            format!("left={left}"),
+            format!("right={right}"),
+            format!("top={top}"),
+            format!("bottom={bottom}"),
+            "!".to_string(),
+        ]);
+    }
+    args.extend([
         "videorate".to_string(),
         "!".to_string(),
         format!("video/x-raw,format=I420,framerate={fps}/1"),
@@ -267,7 +330,8 @@ fn build_gst_args(fd: i32, node_id: u32, output: &Path, fps: u32) -> Vec<String>
         "!".to_string(),
         "filesink".to_string(),
         format!("location={}", output.display()),
-    ]
+    ]);
+    args
 }
 
 /// Останавливает GStreamer через SIGINT и ждёт завершения.
@@ -301,7 +365,7 @@ mod tests {
     /// Проверяет, что pipeline содержит нужные элементы.
     #[test]
     fn builds_gst_pipeline() {
-        let args = build_gst_args(7, 42, Path::new("/tmp/out.mkv"), 20);
+        let args = build_gst_args(7, 42, Path::new("/tmp/out.mkv"), 20, None, (1920, 1080));
         assert!(args.contains(&"pipewiresrc".to_string()));
         assert!(args.contains(&"fd=7".to_string()));
         assert!(args.contains(&"path=42".to_string()));
@@ -309,5 +373,28 @@ mod tests {
         assert!(args.contains(&"video/x-raw,format=I420,framerate=20/1".to_string()));
         assert!(args.contains(&"filesink".to_string()));
         assert!(args.contains(&"location=/tmp/out.mkv".to_string()));
+    }
+
+    /// Проверяет обрезку области через videocrop.
+    #[test]
+    fn builds_crop_pipeline() {
+        let args = build_gst_args(
+            7,
+            42,
+            Path::new("/tmp/out.mkv"),
+            20,
+            Some(Region {
+                x: 100,
+                y: 50,
+                width: 800,
+                height: 600,
+            }),
+            (1920, 1080),
+        );
+        assert!(args.contains(&"videocrop".to_string()));
+        assert!(args.contains(&"left=100".to_string()));
+        assert!(args.contains(&"top=50".to_string()));
+        assert!(args.contains(&"right=1020".to_string()));
+        assert!(args.contains(&"bottom=430".to_string()));
     }
 }

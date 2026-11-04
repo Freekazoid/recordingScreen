@@ -4,6 +4,7 @@
 //! он запускает/останавливает ffmpeg. Это позволяет позже добавить
 //! Wayland-портал и аудиодорожки за тем же интерфейсом.
 
+use super::Region;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use thiserror::Error;
@@ -42,6 +43,16 @@ impl X11VideoRecorder {
 
     /// Запускает запись всего экрана в `output`.
     pub fn start(&mut self, output: &Path, fps: u32) -> Result<(), CaptureError> {
+        self.start_region(output, fps, None)
+    }
+
+    /// Запускает запись указанной области (None — весь экран).
+    pub fn start_region(
+        &mut self,
+        output: &Path,
+        fps: u32,
+        region: Option<Region>,
+    ) -> Result<(), CaptureError> {
         if self.child.is_some() {
             return Err(CaptureError::AlreadyRunning);
         }
@@ -56,7 +67,7 @@ impl X11VideoRecorder {
         let (width, height) = display_size();
         let mut command = Command::new("ffmpeg");
         command
-            .args(build_args(&display, (width, height), fps, output))
+            .args(build_args(&display, (width, height), fps, output, region))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -120,7 +131,21 @@ impl Drop for X11VideoRecorder {
 }
 
 /// Собирает аргументы ffmpeg для X11-захвата.
-fn build_args(display: &str, size: (u32, u32), fps: u32, output: &Path) -> Vec<String> {
+fn build_args(
+    display: &str,
+    size: (u32, u32),
+    fps: u32,
+    output: &Path,
+    region: Option<Region>,
+) -> Vec<String> {
+    let (input, width, height) = match region {
+        Some(region) => (
+            format!("{display}+{},{}", region.x, region.y),
+            region.width,
+            region.height,
+        ),
+        None => (display.to_string(), size.0, size.1),
+    };
     vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
@@ -132,9 +157,9 @@ fn build_args(display: &str, size: (u32, u32), fps: u32, output: &Path) -> Vec<S
         "-framerate".to_string(),
         fps.to_string(),
         "-video_size".to_string(),
-        format!("{}x{}", size.0, size.1),
+        format!("{width}x{height}"),
         "-i".to_string(),
-        display.to_string(),
+        input,
         "-c:v".to_string(),
         "libx264".to_string(),
         "-preset".to_string(),
@@ -145,6 +170,130 @@ fn build_args(display: &str, size: (u32, u32), fps: u32, output: &Path) -> Vec<S
         "yuv420p".to_string(),
         output.to_string_lossy().to_string(),
     ]
+}
+
+/// Окно X11 для выбора «Программа».
+#[derive(Debug, Clone)]
+pub struct WindowInfo {
+    pub id: u64,
+    pub title: String,
+    pub region: Region,
+}
+
+/// Возвращает список видимых окон X11.
+pub fn list_windows() -> Result<Vec<WindowInfo>, String> {
+    let output = Command::new("xprop")
+        .args(["-root", "_NET_CLIENT_LIST"])
+        .env("LC_ALL", "C")
+        .output()
+        .map_err(|error| format!("xprop: {error}"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let Some(list) = text.split('#').nth(1) else {
+        return Ok(Vec::new());
+    };
+    let mut windows = Vec::new();
+    for token in list.split(',') {
+        let token = token.trim();
+        let Ok(id) = u64::from_str_radix(token.trim_start_matches("0x"), 16) else {
+            continue;
+        };
+        let Ok(info) = Command::new("xwininfo")
+            .args(["-id", token])
+            .env("LC_ALL", "C")
+            .output()
+        else {
+            continue;
+        };
+        let info = String::from_utf8_lossy(&info.stdout);
+        let Some(region) = parse_geometry(&info) else {
+            continue;
+        };
+        let Ok(name) = Command::new("xprop")
+            .args(["-id", token, "_NET_WM_NAME", "WM_NAME"])
+            .env("LC_ALL", "C")
+            .output()
+        else {
+            continue;
+        };
+        let title = parse_title(&String::from_utf8_lossy(&name.stdout));
+        if title.is_empty() || region.width < 20 || region.height < 20 {
+            continue;
+        }
+        windows.push(WindowInfo { id, title, region });
+    }
+    Ok(windows)
+}
+
+/// Разбирает `xwininfo` и проверяет, что окно видимо.
+fn parse_geometry(text: &str) -> Option<Region> {
+    if !text.contains("Map State: IsViewable") {
+        return None;
+    }
+    let mut x = None;
+    let mut y = None;
+    let mut width = None;
+    let mut height = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("Absolute upper-left X:") {
+            x = value.trim().parse().ok();
+        } else if let Some(value) = line.strip_prefix("Absolute upper-left Y:") {
+            y = value.trim().parse().ok();
+        } else if let Some(value) = line.strip_prefix("Width:") {
+            width = value.trim().parse().ok();
+        } else if let Some(value) = line.strip_prefix("Height:") {
+            height = value.trim().parse().ok();
+        }
+    }
+    Some(Region {
+        x: x?,
+        y: y?,
+        width: width?,
+        height: height?,
+    })
+}
+
+/// Извлекает имя окна из вывода `xprop`.
+fn parse_title(text: &str) -> String {
+    for line in text.lines() {
+        if let Some((_, value)) = line.split_once('=') {
+            let value = value.trim().trim_matches('"');
+            if !value.is_empty() && value != "N/A" {
+                return value.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// Делает снимок всего X11-экрана в PNG.
+pub fn screenshot(output: &Path) -> Result<(), String> {
+    let display = display_name();
+    let (width, height) = display_size();
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-f",
+            "x11grab",
+            "-video_size",
+            &format!("{width}x{height}"),
+            "-i",
+            &display,
+            "-frames:v",
+            "1",
+            &output.to_string_lossy(),
+        ])
+        .status()
+        .map_err(|error| format!("ffmpeg screenshot: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("ffmpeg screenshot завершился: {status}"))
+    }
 }
 
 /// Возвращает имя X11-дисплея из окружения.
@@ -186,7 +335,7 @@ mod tests {
     /// Проверяет, что команда содержит x11grab и корректный путь.
     #[test]
     fn builds_x11_command() {
-        let args = build_args(":0.0", (1920, 1080), 20, Path::new("/tmp/screen.mkv"));
+        let args = build_args(":0.0", (1920, 1080), 20, Path::new("/tmp/screen.mkv"), None);
         assert!(args.contains(&"x11grab".to_string()));
         assert!(args.contains(&"1920x1080".to_string()));
         assert!(args.contains(&"/tmp/screen.mkv".to_string()));
@@ -212,5 +361,13 @@ mod tests {
         recorder.stop().expect("остановка записи");
         let size = std::fs::metadata(&output).expect("файл записи").len();
         assert!(size > 0, "файл записи пустой");
+    }
+
+    /// Проверяет перечисление окон X11; запускать вручную.
+    #[test]
+    #[ignore = "требует X11 и xprop/xwininfo"]
+    fn lists_x11_windows() {
+        let windows = list_windows().expect("windows");
+        assert!(windows.iter().all(|window| window.region.width > 0));
     }
 }
