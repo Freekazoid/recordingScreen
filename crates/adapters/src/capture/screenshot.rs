@@ -10,6 +10,7 @@ use ashpd::desktop::{PersistMode, Session};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Делает снимок экрана: ScreenCast на Wayland, ffmpeg на X11.
 pub fn take_screenshot(output: &Path) -> Result<PathBuf, String> {
@@ -24,7 +25,11 @@ pub fn take_screenshot(output: &Path) -> Result<PathBuf, String> {
 /// Снимок одного кадра из ScreenCast-потока.
 fn take_screenshot_wayland(output: &Path) -> Result<PathBuf, String> {
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
-    let (proxy, session, fd, node_id) = runtime.block_on(open_stream())?;
+    let (proxy, session, fd, node_id) = runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(60), open_stream())
+            .await
+            .map_err(|_| "таймаут ожидания портала (60 с)".to_string())?
+    })?;
     let raw_fd = fd.as_raw_fd();
     if unsafe { libc::fcntl(raw_fd, libc::F_SETFD, 0) } == -1 {
         return Err("не удалось подготовить PipeWire fd".to_string());
@@ -32,7 +37,7 @@ fn take_screenshot_wayland(output: &Path) -> Result<PathBuf, String> {
     let log_path = output.with_extension("gst.log");
     let log = std::fs::File::create(&log_path)
         .map_err(|error| format!("лог GStreamer {}: {error}", log_path.display()))?;
-    let status = Command::new("gst-launch-1.0")
+    let mut child = Command::new("gst-launch-1.0")
         .args([
             "-e",
             "pipewiresrc",
@@ -52,8 +57,23 @@ fn take_screenshot_wayland(output: &Path) -> Result<PathBuf, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(log))
-        .status()
+        .spawn()
         .map_err(|error| format!("gst-launch-1.0: {error}"))?;
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < Duration::from_secs(8) => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("таймаут получения кадра (8 с)".to_string());
+            }
+            Err(error) => return Err(format!("ожидание gst: {error}")),
+        }
+    };
     drop(fd);
     drop(session);
     drop(proxy);

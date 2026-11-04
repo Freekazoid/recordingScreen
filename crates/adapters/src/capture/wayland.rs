@@ -56,7 +56,11 @@ impl WaylandPortalRecorder {
     ) -> Result<(), String> {
         self.clear_finished();
         if self.worker.is_some() {
-            return Err("Wayland-запись уже запущена".to_string());
+            if self.active.load(Ordering::SeqCst) {
+                return Err("Wayland-запись уже запущена".to_string());
+            }
+            // Старый worker застрял в диалоге/ошибке — сбрасываем его.
+            self.force_reset();
         }
         let output = output.to_path_buf();
         if let Some(parent) = output.parent() {
@@ -192,6 +196,21 @@ impl WaylandPortalRecorder {
         }
     }
 
+    /// Принудительно сбрасывает застрявший worker, не блокируя UI.
+    pub fn force_reset(&mut self) {
+        if let Some(sender) = self.stop_tx.take() {
+            let _ = sender.send(());
+        }
+        if let Some(worker) = self.worker.take()
+            && worker.is_finished()
+        {
+            let _ = worker.join();
+        }
+        // Worker в диалоге портала завершится сам; join здесь заморозил бы UI.
+        self.start_rx = None;
+        self.active.store(false, Ordering::SeqCst);
+    }
+
     /// Останавливает запись и закрывает портальную сессию.
     pub fn stop(&mut self) -> Result<(), String> {
         if let Some(sender) = self.stop_tx.take() {
@@ -212,12 +231,7 @@ impl WaylandPortalRecorder {
 
     /// Просит остановиться, не блокируя UI (портал может ждать диалог).
     pub fn request_stop(&mut self) {
-        if let Some(sender) = self.stop_tx.take() {
-            let _ = sender.send(());
-        }
-        self.start_rx = None;
-        self.active.store(false, Ordering::SeqCst);
-        self.clear_finished();
+        self.force_reset();
     }
 }
 
