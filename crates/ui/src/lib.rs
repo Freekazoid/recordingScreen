@@ -9,8 +9,10 @@ use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke,
     TextStyle, Vec2,
 };
-use screenrecorder_adapters::Paths;
+use screenrecorder_adapters::{Paths, X11VideoRecorder};
 use screenrecorder_application::{Settings, SettingsStore};
+use screenrecorder_domain::SessionId;
+use std::path::PathBuf;
 
 const BG: Color32 = Color32::from_rgb(0x20, 0x20, 0x20);
 const TEXT: Color32 = Color32::from_rgb(0xcc, 0xca, 0xca);
@@ -41,6 +43,9 @@ pub struct ScreenRecorderApp {
     output_format: String,
     video_quality: String,
     audio_track_mode: String,
+    recorder: X11VideoRecorder,
+    recording: bool,
+    session_dir: Option<PathBuf>,
 }
 
 impl ScreenRecorderApp {
@@ -55,6 +60,73 @@ impl ScreenRecorderApp {
             output_format: "mp4".to_string(),
             video_quality: "Хорошее (CRF 23)".to_string(),
             audio_track_mode: "Как есть (без пережатия)".to_string(),
+            recorder: X11VideoRecorder::new(),
+            recording: false,
+            session_dir: None,
+        }
+    }
+
+    /// Запускает или останавливает запись X11-экрана.
+    fn toggle_recording(&mut self, mode: &str) {
+        if self.recording {
+            self.stop_recording();
+            return;
+        }
+
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            self.status = "Wayland: запись через портал — следующий этап".to_string();
+            self.log = "X11-захват недоступен в Wayland-сессии. Портал ScreenCast \
+                        будет добавлен на этапе 2."
+                .to_string();
+            return;
+        }
+
+        let session_id = SessionId::new();
+        let session_dir = self.paths.session_dir(session_id.as_str());
+        let output = session_dir.join("screen.mkv");
+        match self.recorder.start(&output, self.settings.capture.fps) {
+            Ok(()) => {
+                self.recording = true;
+                self.session_dir = Some(session_dir);
+                self.status = format!("Идёт запись: {mode}");
+                self.log = format!("Запись начата: {}", output.display());
+            }
+            Err(error) => {
+                self.status = format!("Ошибка записи: {error}");
+                self.log = format!("Не удалось начать запись: {error}");
+            }
+        }
+    }
+
+    /// Останавливает текущую запись.
+    fn stop_recording(&mut self) {
+        if !self.recording {
+            return;
+        }
+        self.recording = false;
+        match self.recorder.stop() {
+            Ok(()) => {
+                let path = self
+                    .session_dir
+                    .as_ref()
+                    .map(|dir| dir.join("screen.mkv").display().to_string())
+                    .unwrap_or_else(|| "screen.mkv".to_string());
+                self.status = "Запись остановлена".to_string();
+                self.log = format!("Запись сохранена: {path}");
+            }
+            Err(error) => {
+                self.status = format!("Ошибка остановки: {error}");
+                self.log = format!("Не удалось остановить запись: {error}");
+            }
+        }
+    }
+
+    /// Проверяет, не завершился ли ffmpeg сам.
+    fn poll_recording(&mut self) {
+        if self.recording && !self.recorder.is_running() {
+            self.recording = false;
+            self.status = "Запись завершена".to_string();
+            self.log = "ffmpeg завершился. Проверьте файл записи.".to_string();
         }
     }
 
@@ -62,7 +134,8 @@ impl ScreenRecorderApp {
     fn status_row(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(Vec2::new(32.0, 24.0), Sense::hover());
-            ui.painter().circle_filled(rect.center(), 9.0, RED);
+            let color = if self.recording { GREEN } else { RED };
+            ui.painter().circle_filled(rect.center(), 9.0, color);
             ui.add_space(4.0);
             ui.label(RichText::new(&self.status).size(14.0).color(TEXT));
         });
@@ -166,7 +239,7 @@ impl ScreenRecorderApp {
             )
             .clicked()
             {
-                self.log = "Режим «Весь экран» будет добавлен на этапе 2.".to_string();
+                self.toggle_recording("Весь экран");
             }
             ui.add_space(8.0);
             if Self::record_button(
@@ -177,7 +250,11 @@ impl ScreenRecorderApp {
             )
             .clicked()
             {
-                self.log = "Режим «Область экрана» будет добавлен на этапе 2.".to_string();
+                if self.recording {
+                    self.stop_recording();
+                } else {
+                    self.log = "Режим «Область экрана» будет добавлен на этапе 2.".to_string();
+                }
             }
             ui.add_space(8.0);
             if Self::record_button(
@@ -188,7 +265,11 @@ impl ScreenRecorderApp {
             )
             .clicked()
             {
-                self.log = "Режим «Программа» будет добавлен на этапе 2.".to_string();
+                if self.recording {
+                    self.stop_recording();
+                } else {
+                    self.log = "Режим «Программа» будет добавлен на этапе 2.".to_string();
+                }
             }
             ui.add_space(8.0);
             if Self::record_button(
@@ -199,7 +280,11 @@ impl ScreenRecorderApp {
             )
             .clicked()
             {
-                self.log = "Режим «Только аудио» будет добавлен на этапе 2.".to_string();
+                if self.recording {
+                    self.stop_recording();
+                } else {
+                    self.log = "Режим «Только аудио» будет добавлен на этапе 2.".to_string();
+                }
             }
         });
 
@@ -424,6 +509,7 @@ impl ScreenRecorderApp {
 impl eframe::App for ScreenRecorderApp {
     /// Обновляет интерфейс на каждом кадре.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.poll_recording();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BG).inner_margin(Margin::same(5)))
             .show(ui, |ui| {

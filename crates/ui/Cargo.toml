@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 screenrecorder-adapters = { path = "../adapters" }
 screenrecorder-application = { path = "../application" }
+screenrecorder-domain = { path = "../domain" }
 eframe.workspace = true
 egui_extras = { version = "0.37", features = ["image"] }
 serde_json.workspace = true
