@@ -152,7 +152,12 @@ pub struct ScreenRecorderApp {
 impl ScreenRecorderApp {
     /// Создаёт приложение с уже загруженными настройками и путями.
     pub fn new(paths: Paths, settings: Settings) -> Self {
-        let model_manager = ModelManager::new(paths.models_dir());
+        let models_root = if settings.models_dir.trim().is_empty() {
+            paths.models_dir()
+        } else {
+            PathBuf::from(settings.models_dir.trim())
+        };
+        let model_manager = ModelManager::new(models_root);
         let audio_devices = LinuxAudioRecorder::list_devices().unwrap_or_default();
         let recordings = paths.data_dir.join("recordings");
         let recovered = recover_incomplete(&recordings).unwrap_or_default();
@@ -587,7 +592,10 @@ impl ScreenRecorderApp {
             FolderTarget::Output => "Папка результатов",
         };
         match target {
-            FolderTarget::Models => self.settings.models_dir = value.clone(),
+            FolderTarget::Models => {
+                self.settings.models_dir = value.clone();
+                self.model_manager = ModelManager::new(&value);
+            }
             FolderTarget::Output => self.settings.output_dir = value.clone(),
         }
         self.settings_dirty = true;
@@ -604,6 +612,12 @@ impl ScreenRecorderApp {
             Ok(()) => self.log = "Настройки сохранены автоматически.".to_string(),
             Err(error) => self.status = format!("Ошибка сохранения: {error}"),
         }
+        let root = if self.settings.models_dir.trim().is_empty() {
+            self.paths.models_dir()
+        } else {
+            PathBuf::from(self.settings.models_dir.trim())
+        };
+        self.model_manager = ModelManager::new(root);
         self.settings_dirty = false;
     }
 
@@ -1285,7 +1299,11 @@ impl ScreenRecorderApp {
             self.log = "Распознавание пропущено: нет аудиодорожек.".to_string();
             return;
         }
-        let models_dir = self.paths.models_dir();
+        let models_dir = if self.settings.models_dir.trim().is_empty() {
+            self.paths.models_dir()
+        } else {
+            PathBuf::from(self.settings.models_dir.trim())
+        };
         let language = self.settings.transcription.language.clone();
         let diarization_enabled = self.settings.diarization.enabled;
         let min_speakers = self.settings.diarization.min_speakers;
