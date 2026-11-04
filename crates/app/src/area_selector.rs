@@ -20,6 +20,8 @@ pub fn run(image_path: &Path, out_path: &Path) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_fullscreen(true)
+            .with_inner_size([size[0] as f32, size[1] as f32])
+            .with_position([0.0, 0.0])
             .with_decorations(false)
             .with_always_on_top()
             .with_title("Выбор области"),
