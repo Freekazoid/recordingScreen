@@ -316,40 +316,23 @@ impl ScreenRecorderApp {
             self.status = "Не удалось определить путь к приложению".to_string();
             return;
         };
-        let cache_dir = self.paths.cache_dir.clone();
-        let _ = std::fs::create_dir_all(&cache_dir);
-        let cached_image = cache_dir.join("area-screenshot.png");
-        // Снимок сохраняется между запусками: портал запрашивается один раз,
-        // а не при каждом выборе области. Обновить можно в настройках.
-        let use_cache = std::fs::metadata(&cached_image).is_ok_and(|meta| meta.len() > 0);
-        let cache_target = cached_image.clone();
-
         let stamp = Local::now().format("%s%f");
-        let image = if use_cache {
-            cached_image
-        } else {
-            cache_dir.join(format!("area-screenshot-{stamp}.png"))
-        };
+        let image = std::env::temp_dir().join(format!("screenrecorder-area-{stamp}.png"));
         let out = std::env::temp_dir().join(format!("screenrecorder-area-{stamp}.txt"));
-        let screenshot_needed = !use_cache;
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             let result = (|| {
-                if screenshot_needed {
-                    take_screenshot(&image)?;
-                    let _ = std::fs::copy(&image, &cache_target);
-                }
+                // Снимок делается сразу после нажатия «Область экрана»:
+                // на нём пользователь и выделяет нужный прямоугольник.
+                take_screenshot(&image)?;
                 let status = Command::new(exe)
                     .arg("--select-area")
                     .arg(&image)
                     .arg(&out)
                     .status()
                     .map_err(|error| format!("окно выбора: {error}"))?;
-                // Временный снимок нужен только окну выбора.
-                if screenshot_needed {
-                    let _ = std::fs::remove_file(&image);
-                    let _ = std::fs::remove_file(image.with_extension("gst.log"));
-                }
+                let _ = std::fs::remove_file(&image);
+                let _ = std::fs::remove_file(image.with_extension("gst.log"));
                 if !status.success() {
                     return Err(format!("выбор области завершился: {status}"));
                 }
@@ -363,16 +346,8 @@ impl ScreenRecorderApp {
             let _ = sender.send(result);
         });
         self.area_rx = Some(receiver);
-        self.status = if use_cache {
-            "Выбор области (сохранённый снимок)…".to_string()
-        } else {
-            "Снимок экрана для выбора области…".to_string()
-        };
-        self.log = if use_cache {
-            "Использую сохранённый снимок области. Обновить его можно в настройках.".to_string()
-        } else {
-            "Снимок экрана сохранён для следующих выборов области.".to_string()
-        };
+        self.status = "Снимок экрана для выбора области…".to_string();
+        self.log = "Снимок экрана делается сейчас; затем выделите область.".to_string();
     }
 
     /// Забирает результат выбора области.
@@ -1387,14 +1362,6 @@ impl ScreenRecorderApp {
                         .changed()
                     {
                         self.settings_dirty = true;
-                    }
-
-                    ui.add_space(4.0);
-                    if ui.button("Обновить снимок области").clicked() {
-                        let snapshot = self.paths.cache_dir.join("area-screenshot.png");
-                        let _ = std::fs::remove_file(snapshot);
-                        self.log =
-                            "Снимок области будет обновлён при следующем выборе.".to_string();
                     }
                 });
 
