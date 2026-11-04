@@ -1205,28 +1205,45 @@ impl ScreenRecorderApp {
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             let result = (|| {
-                let audio = if has_mic && has_system {
-                    let mix = dir.join("mix.wav");
-                    merge_audio(Some(system), Some(mic), &mix)
-                        .map_err(|error| format!("микс аудио: {error}"))?;
-                    mix
-                } else if has_mic {
-                    mic
-                } else {
-                    system
-                };
-                let mut worker = MlWorker::spawn(&models_dir)?;
-                let mut transcript = worker.transcribe(&audio, Some(&language), true)?;
-                drop(worker);
                 let mut warning = None;
-                if diarization_enabled {
-                    match DiarizeWorker::spawn(&models_dir)
-                        .and_then(|mut worker| worker.diarize(&audio, min_speakers, max_speakers))
-                    {
-                        Ok(turns) => assign_speakers(&mut transcript, &turns),
-                        Err(error) => warning = Some(format!("диаризация: {error}")),
+                let mut worker = MlWorker::spawn(&models_dir)?;
+                let transcript = if has_mic && has_system {
+                    // Channel-aware: system и mic транскрибируются отдельно,
+                    // затем сегменты сливаются по времени.
+                    let mut system_transcript =
+                        worker.transcribe(&system, Some(&language), true)?;
+                    let mut mic_transcript = worker.transcribe(&mic, Some(&language), true)?;
+                    for segment in &mut mic_transcript.segments {
+                        segment.speaker = Some("Микрофон".to_string());
                     }
-                }
+                    if diarization_enabled {
+                        match DiarizeWorker::spawn(&models_dir).and_then(|mut worker| {
+                            worker.diarize(&system, min_speakers, max_speakers)
+                        }) {
+                            Ok(turns) => assign_speakers(&mut system_transcript, &turns),
+                            Err(error) => warning = Some(format!("диаризация: {error}")),
+                        }
+                    }
+                    let mut segments = std::mem::take(&mut system_transcript.segments);
+                    segments.extend(mic_transcript.segments);
+                    segments.sort_by_key(|segment| segment.start_ms);
+                    Transcript {
+                        language: system_transcript.language,
+                        segments,
+                    }
+                } else {
+                    let (audio, label) = if has_mic {
+                        (mic, "Микрофон")
+                    } else {
+                        (system, "Система")
+                    };
+                    let mut transcript = worker.transcribe(&audio, Some(&language), true)?;
+                    for segment in &mut transcript.segments {
+                        segment.speaker = Some(label.to_string());
+                    }
+                    transcript
+                };
+                drop(worker);
                 let text_path = dir.join("transcript.txt");
                 let json_path = dir.join("transcript.json");
                 let srt_path = dir.join("transcript.srt");
