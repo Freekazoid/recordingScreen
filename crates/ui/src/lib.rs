@@ -1343,8 +1343,69 @@ impl ScreenRecorderApp {
         }
         if let Some(session_dir) = self.session_dir.clone() {
             append_session_log(&session_dir, "остановка записи");
-            self.start_export(&session_dir, audio_only, None);
+            self.enqueue_export(&session_dir);
         }
+    }
+
+    /// Ставит экспорт сессии в очередь.
+    fn enqueue_export(&mut self, session_dir: &Path) {
+        if self.exporting {
+            return;
+        }
+        let session_id = session_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("session")
+            .to_string();
+        if self
+            .queued_jobs
+            .iter()
+            .any(|job| job.session_id == session_id && job.kind == "export")
+        {
+            return;
+        }
+        let has_video = session_dir.join("screen.mkv").exists();
+        let has_audio =
+            session_dir.join("system.wav").exists() || session_dir.join("mic.wav").exists();
+        if !has_video && !has_audio {
+            self.log = "Экспорт пропущен: нет файлов.".to_string();
+            return;
+        }
+        let job = JobRecord::new(session_id, "export");
+        if let Err(error) = self.history.upsert_job(&job) {
+            self.log = format!("История задач: {error}");
+        }
+        self.queued_jobs.push(job);
+        self.status = "Экспорт в очереди".to_string();
+    }
+
+    /// Ставит распознавание сессии в очередь.
+    fn enqueue_transcription(&mut self, session_dir: &Path) {
+        if !self.settings.transcription.enabled || self.transcribing {
+            return;
+        }
+        let has_audio =
+            session_dir.join("system.wav").exists() || session_dir.join("mic.wav").exists();
+        if !has_audio || session_dir.join("transcript.txt").exists() {
+            return;
+        }
+        let session_id = session_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("session")
+            .to_string();
+        if self
+            .queued_jobs
+            .iter()
+            .any(|job| job.session_id == session_id && job.kind == "transcribe")
+        {
+            return;
+        }
+        let job = JobRecord::new(session_id, "transcribe");
+        if let Err(error) = self.history.upsert_job(&job) {
+            self.log = format!("История задач: {error}");
+        }
+        self.queued_jobs.push(job);
     }
 
     /// Запускает следующую восстановленную задачу из очереди.
@@ -1722,7 +1783,7 @@ impl ScreenRecorderApp {
                     self.sync_history(&dir);
                 }
                 if let Some(dir) = self.session_dir.clone() {
-                    self.start_transcription(&dir, None);
+                    self.enqueue_transcription(&dir);
                 }
             }
             Err(error) => {
@@ -1813,7 +1874,7 @@ impl ScreenRecorderApp {
                 }
                 self.finalize_manifest(audio_only);
                 if let Some(session_dir) = self.session_dir.clone() {
-                    self.start_export(&session_dir, audio_only, None);
+                    self.enqueue_export(&session_dir);
                 }
                 if self.using_wayland {
                     let _ = self.wayland_recorder.stop();
@@ -2333,6 +2394,13 @@ impl ScreenRecorderApp {
                     .animate(true)
                     .desired_width(ui.available_width())
                     .text(label),
+            );
+        }
+        if !self.queued_jobs.is_empty() {
+            ui.label(
+                RichText::new(format!("В очереди задач: {}", self.queued_jobs.len()))
+                    .size(11.0)
+                    .color(HINT),
             );
         }
     }
