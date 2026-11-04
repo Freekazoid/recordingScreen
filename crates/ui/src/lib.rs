@@ -18,6 +18,7 @@ use screenrecorder_application::{Settings, SettingsStore};
 use screenrecorder_domain::SessionId;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::Instant;
 
 /// События фоновой загрузки модели.
 enum DownloadEvent {
@@ -77,6 +78,7 @@ pub struct ScreenRecorderApp {
     probe_note: String,
     export_rx: Option<Receiver<Result<PathBuf, String>>>,
     exporting: bool,
+    audio_offset_ms: i64,
 }
 
 impl ScreenRecorderApp {
@@ -109,6 +111,7 @@ impl ScreenRecorderApp {
             probe_note: String::new(),
             export_rx: None,
             exporting: false,
+            audio_offset_ms: 0,
         }
     }
 
@@ -269,6 +272,7 @@ impl ScreenRecorderApp {
         let output = session_dir.join("screen.mkv");
         match self.recorder.start(&output, self.settings.capture.fps) {
             Ok(()) => {
+                let video_started = Instant::now();
                 let mic_device = self.settings.capture.mic_device.clone();
                 let system_device = self.settings.capture.system_device.clone();
                 match self.audio_recorder.start(
@@ -295,6 +299,7 @@ impl ScreenRecorderApp {
                         self.log = format!("Видео пишется без звука: {error}");
                     }
                 }
+                self.audio_offset_ms = video_started.elapsed().as_millis() as i64;
                 self.recording = true;
                 self.session_dir = Some(session_dir);
                 self.status = format!("Идёт запись: {mode}");
@@ -366,6 +371,7 @@ impl ScreenRecorderApp {
             format,
             crf: crf_from_label(&self.video_quality),
             audio_mode: audio_mode_from_label(&self.audio_track_mode),
+            audio_offset_ms: self.audio_offset_ms,
         };
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {

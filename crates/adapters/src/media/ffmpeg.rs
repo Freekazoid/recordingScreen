@@ -40,6 +40,7 @@ pub struct ExportRequest {
     pub format: String,
     pub crf: u32,
     pub audio_mode: String,
+    pub audio_offset_ms: i64,
 }
 
 /// Сводит видео и аудио в итоговый файл.
@@ -90,13 +91,22 @@ fn build_args(request: &ExportRequest) -> Vec<String> {
 
     let mut audio_inputs = Vec::new();
     let mut next_input = 1;
+    let offset = request.audio_offset_ms as f64 / 1000.0;
     if let Some(system) = &request.system_audio {
+        if offset.abs() > 0.001 {
+            args.push("-itsoffset".to_string());
+            args.push(format!("{offset:.3}"));
+        }
         args.push("-i".to_string());
         args.push(system.to_string_lossy().to_string());
         audio_inputs.push(next_input);
         next_input += 1;
     }
     if let Some(mic) = &request.mic_audio {
+        if offset.abs() > 0.001 {
+            args.push("-itsoffset".to_string());
+            args.push(format!("{offset:.3}"));
+        }
         args.push("-i".to_string());
         args.push(mic.to_string_lossy().to_string());
         audio_inputs.push(next_input);
@@ -213,9 +223,11 @@ mod tests {
             format: "mp4".to_string(),
             crf: 23,
             audio_mode: "aac".to_string(),
+            audio_offset_ms: 120,
         };
         let args = build_args(&request);
         assert!(args.contains(&"-filter_complex".to_string()));
+        assert!(args.contains(&"-itsoffset".to_string()));
         assert!(args.iter().any(|arg| arg.contains("amix=inputs=2")));
         assert!(args.contains(&"aac".to_string()));
         assert_eq!(args.last(), Some(&"/tmp/out.mp4".to_string()));
@@ -232,6 +244,7 @@ mod tests {
             format: "mkv".to_string(),
             crf: 28,
             audio_mode: "none".to_string(),
+            audio_offset_ms: 0,
         };
         let args = build_args(&request);
         assert!(args.contains(&"-an".to_string()));
@@ -293,6 +306,7 @@ mod tests {
             format: "mp4".to_string(),
             crf: 23,
             audio_mode: "aac".to_string(),
+            audio_offset_ms: 0,
         };
         merge_recording(&request).expect("merge");
         assert!(is_usable(&output));
