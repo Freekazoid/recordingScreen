@@ -2470,6 +2470,15 @@ impl ScreenRecorderApp {
 
     /// Рисует вкладку «Запись».
     fn draw_record(&mut self, ui: &mut egui::Ui) {
+        // Прокрутка нужна только для маленьких окон: при обычном размере
+        // все элементы, включая кнопку отмены, помещаются целиком.
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.draw_record_content(ui));
+    }
+
+    /// Рисует содержимое вкладки «Запись».
+    fn draw_record_content(&mut self, ui: &mut egui::Ui) {
         if self.recording {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -2608,9 +2617,6 @@ impl ScreenRecorderApp {
                 GREEN
             };
             ui.painter().circle_filled(rect.center(), 4.0, color);
-            if active {
-                ui.spinner();
-            }
             ui.label(RichText::new(title).strong().color(TEXT));
         });
         ui.label(RichText::new(detail).size(11.0).color(HINT));
@@ -3607,7 +3613,7 @@ fn configure_style(ctx: &egui::Context) {
 pub fn run(paths: Paths, settings: Settings) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([380.0, 600.0])
+            .with_inner_size([380.0, 660.0])
             .with_min_inner_size([380.0, 600.0])
             .with_resizable(false)
             .with_title("Рекордер экрана"),
