@@ -427,7 +427,11 @@ fn state_name(state: ManifestState) -> &'static str {
 /// Форматирует дату для отображения в UI.
 pub fn display_date(value: &str) -> String {
     DateTime::parse_from_rfc3339(value)
-        .map(|date| date.format("%d.%m.%Y %H:%M").to_string())
+        .map(|date| {
+            date.with_timezone(&chrono::Local)
+                .format("%d.%m.%Y %H:%M")
+                .to_string()
+        })
         .unwrap_or_else(|_| value.to_string())
 }
 

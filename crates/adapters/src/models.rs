@@ -255,6 +255,47 @@ impl ModelManager {
         Ok(())
     }
 
+    /// Удаляет файлы модели и освобождает каталог.
+    pub fn delete(&self, id: &str) -> Result<(), ModelError> {
+        let spec = Self::spec(id).ok_or_else(|| ModelError::UnknownModel(id.to_string()))?;
+        for file in spec.files {
+            let path = self.file_path(spec, file);
+            if path.exists() {
+                fs::remove_file(&path).map_err(|source| ModelError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+            }
+            let part = path.with_extension(format!(
+                "{}.part",
+                path.extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("download")
+            ));
+            if part.exists() {
+                let _ = fs::remove_file(part);
+            }
+        }
+        let dir = self.root.join(spec.id);
+        let _ = fs::remove_dir(dir);
+        Ok(())
+    }
+
+    /// Возвращает суммарный размер файлов модели на диске.
+    pub fn size(&self, id: &str) -> u64 {
+        let Some(spec) = Self::spec(id) else {
+            return 0;
+        };
+        spec.files
+            .iter()
+            .map(|file| {
+                fs::metadata(self.file_path(spec, file))
+                    .map(|meta| meta.len())
+                    .unwrap_or(file.size)
+            })
+            .sum()
+    }
+
     /// Проверяет SHA256 файла модели.
     pub fn verify(&self, id: &str) -> Result<(), ModelError> {
         let spec = Self::spec(id).ok_or_else(|| ModelError::UnknownModel(id.to_string()))?;
@@ -337,6 +378,19 @@ mod tests {
         )
         .expect("hash");
         assert!(verify_sha256(&path, "00").is_err());
+    }
+
+    /// Проверяет удаление файлов модели.
+    #[test]
+    fn deletes_model_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ModelManager::new(dir.path());
+        let spec = ModelManager::spec("vad").expect("vad");
+        let path = manager.file_path(spec, &spec.files[0]);
+        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        fs::write(&path, b"test").expect("write");
+        manager.delete("vad").expect("delete");
+        assert!(!path.exists());
     }
 
     /// Реальное скачивание маленькой VAD-модели; запускать вручную.
