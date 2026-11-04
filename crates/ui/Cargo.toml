@@ -12,6 +12,9 @@ screenrecorder-domain = { path = "../domain" }
 chrono.workspace = true
 eframe.workspace = true
 egui_extras = { version = "0.37", features = ["image"] }
+global-hotkey.workspace = true
+image.workspace = true
+tray-icon.workspace = true
 rfd.workspace = true
 serde_json.workspace = true
 

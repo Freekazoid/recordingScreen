@@ -10,6 +10,10 @@ use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke,
     TextStyle, Vec2,
 };
+use global_hotkey::{
+    GlobalHotKeyEvent, GlobalHotKeyManager,
+    hotkey::{Code, HotKey, Modifiers},
+};
 use screenrecorder_adapters::{
     AudioDevice, AudioDeviceKind, AudioProbe, DownloadProgress, ExportRequest, LinuxAudioRecorder,
     ModelManager, PORTAL_CANCELLED, Paths, PortalSource, Region, WaylandPortalRecorder, WindowInfo,
@@ -17,16 +21,20 @@ use screenrecorder_adapters::{
     recover_all_segments, take_screenshot,
 };
 use screenrecorder_application::{
-    DiarizeWorker, HistoryStore, JobRecord, ManifestState, MlWorker, Rect, SessionManifest,
-    SessionRecord, Settings, SettingsStore, TrackManifest, Transcript, append_session_log,
-    assign_speakers, display_date, import_manifests, load_manifest, recover_incomplete,
-    save_manifest,
+    DiarizeWorker, HistoryStore, JobRecord, ManifestState, MlWorker, NemoWorker, Rect,
+    SessionManifest, SessionRecord, Settings, SettingsStore, TrackManifest, Transcript,
+    append_session_log, assign_speakers, display_date, import_manifests, load_manifest,
+    recover_incomplete, save_manifest,
 };
 use screenrecorder_domain::{SessionId, TrackKind, TrackStats, TrackStatus};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
+use tray_icon::{
+    TrayIcon, TrayIconBuilder,
+    menu::{Menu, MenuEvent, MenuId, MenuItem},
+};
 
 /// Результат фоновой загрузки модели.
 enum DownloadEvent {
@@ -74,7 +82,6 @@ const BTN: Color32 = Color32::from_rgb(0x35, 0x35, 0x35);
 const ENTRY: Color32 = Color32::from_rgb(0x28, 0x28, 0x28);
 const HINT: Color32 = Color32::from_rgb(0xe0, 0xb0, 0x40);
 const LINK: Color32 = Color32::from_rgb(0x8c, 0xc8, 0xff);
-const LOG_TEXT: Color32 = Color32::from_rgb(0xbb, 0xbb, 0x88);
 const WHITE: Color32 = Color32::WHITE;
 const RED: Color32 = Color32::from_rgb(0xee, 0x54, 0x54);
 const GREEN: Color32 = Color32::from_rgb(0x46, 0xb8, 0x6f);
@@ -140,6 +147,12 @@ pub struct ScreenRecorderApp {
     transcription_job: Option<JobRecord>,
     queued_jobs: Vec<JobRecord>,
     delete_confirm: Option<SessionRecord>,
+    tray: Option<TrayIcon>,
+    tray_show_id: Option<MenuId>,
+    tray_toggle_id: Option<MenuId>,
+    tray_quit_id: Option<MenuId>,
+    hotkey_manager: Option<GlobalHotKeyManager>,
+    hotkey_toggle: Option<HotKey>,
 }
 
 impl ScreenRecorderApp {
@@ -185,7 +198,7 @@ impl ScreenRecorderApp {
         }
         let queued_jobs = history.queued_jobs(20).unwrap_or_default();
         let history_records = history.list(100).unwrap_or_default();
-        Self {
+        let mut app = Self {
             paths,
             settings,
             screen: Screen::Record,
@@ -236,6 +249,112 @@ impl ScreenRecorderApp {
             transcription_job: None,
             queued_jobs,
             delete_confirm: None,
+            tray: None,
+            tray_show_id: None,
+            tray_toggle_id: None,
+            tray_quit_id: None,
+            hotkey_manager: None,
+            hotkey_toggle: None,
+        };
+        app.init_tray();
+        app.init_hotkeys();
+        app
+    }
+
+    /// Создаёт иконку в системном трее.
+    fn init_tray(&mut self) {
+        let icon = match image::load_from_memory(include_bytes!("../../../assets/ava100x100.png")) {
+            Ok(image) => image.to_rgba8(),
+            Err(error) => {
+                self.log = format!("Трей: иконка недоступна: {error}");
+                return;
+            }
+        };
+        let (width, height) = icon.dimensions();
+        let icon = match tray_icon::Icon::from_rgba(icon.into_raw(), width, height) {
+            Ok(icon) => icon,
+            Err(error) => {
+                self.log = format!("Трей: иконка: {error}");
+                return;
+            }
+        };
+        let menu = Menu::new();
+        let show = MenuItem::new("Показать", true, None);
+        let toggle = MenuItem::new("Начать/остановить запись", true, None);
+        let quit = MenuItem::new("Выход", true, None);
+        if menu.append(&show).is_err()
+            || menu.append(&toggle).is_err()
+            || menu.append(&quit).is_err()
+        {
+            self.log = "Трей: не удалось собрать меню".to_string();
+            return;
+        }
+        match TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_icon(icon)
+            .with_tooltip("Screen Recorder")
+            .build()
+        {
+            Ok(tray) => {
+                self.tray_show_id = Some(show.id().clone());
+                self.tray_toggle_id = Some(toggle.id().clone());
+                self.tray_quit_id = Some(quit.id().clone());
+                self.tray = Some(tray);
+            }
+            Err(error) => {
+                self.log = format!("Трей недоступен: {error}");
+            }
+        }
+    }
+
+    /// Регистрирует глобальную горячую клавишу Ctrl+Shift+R.
+    fn init_hotkeys(&mut self) {
+        let manager = match GlobalHotKeyManager::new() {
+            Ok(manager) => manager,
+            Err(error) => {
+                self.log = format!("Горячие клавиши недоступны: {error}");
+                return;
+            }
+        };
+        let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyR);
+        if let Err(error) = manager.register(hotkey) {
+            self.log = format!("Не удалось зарегистрировать Ctrl+Shift+R: {error}");
+            return;
+        }
+        self.hotkey_manager = Some(manager);
+        self.hotkey_toggle = Some(hotkey);
+    }
+
+    /// Обрабатывает события трея.
+    fn poll_tray(&mut self, ctx: &egui::Context) {
+        while let Ok(event) = MenuEvent::receiver().try_recv() {
+            if self.tray_show_id.as_ref() == Some(&event.id) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            } else if self.tray_toggle_id.as_ref() == Some(&event.id) {
+                if self.recording {
+                    self.stop_recording();
+                } else {
+                    self.toggle_recording("Весь экран");
+                }
+            } else if self.tray_quit_id.as_ref() == Some(&event.id) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    /// Обрабатывает глобальную горячую клавишу.
+    fn poll_hotkeys(&mut self) {
+        let Some(hotkey) = self.hotkey_toggle else {
+            return;
+        };
+        while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+            if event.id == hotkey.id() && event.state == global_hotkey::HotKeyState::Pressed {
+                if self.recording {
+                    self.stop_recording();
+                } else {
+                    self.toggle_recording("Весь экран");
+                }
+            }
         }
     }
 
@@ -811,6 +930,7 @@ impl ScreenRecorderApp {
             self.recording = true;
             self.recording_mode = Some("Только аудио");
             self.status = "Идёт аудиозапись".to_string();
+            notify("Screen Recorder", "Аудиозапись началась");
         } else {
             self.fail_manifest("не удалось начать запись звука");
             self.audio_only = false;
@@ -872,6 +992,7 @@ impl ScreenRecorderApp {
                 self.recording = true;
                 self.recording_mode = Some("Весь экран");
                 self.status = "Идёт запись: Весь экран".to_string();
+                notify("Screen Recorder", "Запись экрана началась");
             }
             Err(error) => {
                 let reason = error.to_string();
@@ -1103,6 +1224,7 @@ impl ScreenRecorderApp {
                 self.recording_mode = Some(mode);
                 self.session_dir = Some(session_dir);
                 self.status = format!("Идёт запись области {}×{}", region.width, region.height);
+                notify("Screen Recorder", "Запись области началась");
             }
             Err(error) => {
                 let reason = error.to_string();
@@ -1208,10 +1330,15 @@ impl ScreenRecorderApp {
             (Ok(()), Ok(())) => {
                 self.status = "Запись остановлена".to_string();
                 self.log = format!("Запись сохранена: {dir}");
+                notify("Screen Recorder", "Запись остановлена");
             }
             (video, audio) => {
                 self.status = "Запись остановлена с ошибками".to_string();
                 self.log = format!("Остановка: видео={video:?}, звук={audio:?}");
+                notify(
+                    "Screen Recorder",
+                    "Запись остановлена с ошибками; подробности в журнале",
+                );
             }
         }
         if let Some(session_dir) = self.session_dir.clone() {
@@ -1300,6 +1427,7 @@ impl ScreenRecorderApp {
         };
         let language = self.settings.transcription.language.clone();
         let diarization_enabled = self.settings.diarization.enabled;
+        let diarization_engine = self.settings.diarization.engine.clone();
         let min_speakers = self.settings.diarization.min_speakers;
         let max_speakers = self.settings.diarization.max_speakers;
         let dir = session_dir.to_path_buf();
@@ -1319,9 +1447,15 @@ impl ScreenRecorderApp {
                         segment.speaker = Some("Микрофон".to_string());
                     }
                     if diarization_enabled {
-                        match DiarizeWorker::spawn(&models_dir).and_then(|mut worker| {
-                            worker.diarize(&system, min_speakers, max_speakers)
-                        }) {
+                        let turns = if diarization_engine == "nemo" {
+                            NemoWorker::spawn(&models_dir)
+                                .and_then(|mut worker| worker.diarize(&system))
+                        } else {
+                            DiarizeWorker::spawn(&models_dir).and_then(|mut worker| {
+                                worker.diarize(&system, min_speakers, max_speakers)
+                            })
+                        };
+                        match turns {
                             Ok(turns) => assign_speakers(&mut system_transcript, &turns),
                             Err(error) => warning = Some(format!("диаризация: {error}")),
                         }
@@ -1405,6 +1539,7 @@ impl ScreenRecorderApp {
         match result {
             Ok(output) => {
                 self.status = "Транскрипция готова".to_string();
+                notify("Screen Recorder", "Транскрипция готова");
                 self.log = format!(
                     "Текст: {} · JSON: {} · SRT: {} · VTT: {} · MD: {} ({} сегментов, язык {}){}",
                     output.text_path.display(),
@@ -1573,6 +1708,10 @@ impl ScreenRecorderApp {
             Ok(path) => {
                 self.status = "Экспорт завершён".to_string();
                 self.log = format!("Готово: {}", path.display());
+                notify(
+                    "Screen Recorder",
+                    &format!("Экспорт готов: {}", path.display()),
+                );
                 self.last_export_path = Some(path.clone());
                 if let Some(dir) = self.session_dir.clone()
                     && let Ok(mut manifest) = load_manifest(&dir)
@@ -1631,6 +1770,7 @@ impl ScreenRecorderApp {
                         }
                         self.status = "Идёт запись: Wayland".to_string();
                         self.log = "Портал ScreenCast запущен.".to_string();
+                        notify("Screen Recorder", "Запись экрана началась");
                     }
                     Err(error) => {
                         self.recording = false;
@@ -2077,26 +2217,124 @@ impl ScreenRecorderApp {
         });
 
         ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
-            if ui.button("Копировать журнал").clicked() {
-                ui.ctx().copy_text(self.log.clone());
-            }
-            ui.add_space(4.0);
-            egui::ScrollArea::vertical()
-                .max_height(88.0)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(&self.log)
-                                .monospace()
-                                .size(12.0)
-                                .color(LOG_TEXT),
-                        )
-                        .selectable(true)
-                        .wrap(),
-                    );
-                });
+            self.progress_panel(ui);
         });
+    }
+
+    /// Показывает этапы записи и обработки вместо текстового журнала.
+    fn progress_panel(&mut self, ui: &mut egui::Ui) {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum StepState {
+            Pending,
+            Active,
+            Done,
+            Error,
+        }
+
+        let busy =
+            self.recording || self.exporting || self.transcribing || self.preflight_rx.is_some();
+        let transcription_ready = self.status == "Транскрипция готова";
+        let export_ready = self.status == "Экспорт завершён" || transcription_ready;
+        let recording_done = export_ready
+            || self.exporting
+            || self.transcribing
+            || self.status.contains("Запись остановлена");
+        let failed = self.status.starts_with("Ошибка") || self.status.contains("с ошибками");
+        let active = if self.preflight_rx.is_some() {
+            Some("Проверка звука")
+        } else if self.recording && !self.wayland_pending {
+            Some("Запись")
+        } else if self.recording {
+            Some("Ожидание доступа")
+        } else if self.exporting {
+            Some("Экспорт")
+        } else if self.transcribing {
+            Some("Распознавание речи")
+        } else {
+            None
+        };
+
+        let steps = [
+            (
+                "Подготовка",
+                if self.preflight_rx.is_some() {
+                    StepState::Active
+                } else if recording_done || busy {
+                    StepState::Done
+                } else {
+                    StepState::Pending
+                },
+            ),
+            (
+                "Запись",
+                if self.recording {
+                    StepState::Active
+                } else if recording_done {
+                    StepState::Done
+                } else {
+                    StepState::Pending
+                },
+            ),
+            (
+                "Экспорт",
+                if self.exporting {
+                    StepState::Active
+                } else if export_ready {
+                    StepState::Done
+                } else {
+                    StepState::Pending
+                },
+            ),
+            (
+                "Распознавание",
+                if self.transcribing {
+                    StepState::Active
+                } else if transcription_ready {
+                    StepState::Done
+                } else {
+                    StepState::Pending
+                },
+            ),
+            (
+                "Готово",
+                if transcription_ready || (export_ready && !self.settings.transcription.enabled) {
+                    StepState::Done
+                } else {
+                    StepState::Pending
+                },
+            ),
+        ];
+
+        ui.label(RichText::new("Состояние").strong().color(TEXT));
+        ui.add_space(2.0);
+        for (label, mut state) in steps {
+            if failed && active.is_none() {
+                state = StepState::Error;
+            }
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 14.0), Sense::hover());
+                let color = match state {
+                    StepState::Pending => Color32::from_rgb(0x66, 0x66, 0x66),
+                    StepState::Active => LINK,
+                    StepState::Done => GREEN,
+                    StepState::Error => RED,
+                };
+                ui.painter().circle_filled(rect.center(), 4.0, color);
+                if state == StepState::Active {
+                    ui.spinner();
+                }
+                ui.label(RichText::new(label).size(12.0).color(TEXT));
+            });
+        }
+        if let Some(label) = active {
+            ui.add_space(2.0);
+            ui.add(
+                egui::ProgressBar::new(0.0)
+                    .animate(true)
+                    .desired_width(ui.available_width())
+                    .text(label),
+            );
+        }
     }
 
     /// Удаляет запись: экспортированное видео, дорожки и транскрипты.
@@ -2278,6 +2516,8 @@ impl ScreenRecorderApp {
         let whisper_ready = self.model_manager.is_downloaded("whisper");
         let diarization_ready = self.model_manager.is_downloaded("diarization");
         let vad_ready = self.model_manager.is_downloaded("vad");
+        let nemo_ready = self.model_manager.is_downloaded("nemo");
+        let nemo_progress = (self.download_model == Some("nemo")).then_some(self.download_progress);
         let whisper_progress =
             (self.download_model == Some("whisper")).then_some(self.download_progress);
         let diarization_progress =
@@ -2317,6 +2557,16 @@ impl ScreenRecorderApp {
                         "silero-v5.1.2 · whisper.cpp",
                     ) {
                         requested = Some("vad");
+                    }
+                    ui.add_space(4.0);
+                    if Self::model_row(
+                        ui,
+                        "NeMo Sortformer",
+                        nemo_ready,
+                        nemo_progress,
+                        "Nemotron-3 diarization · ONNX",
+                    ) {
+                        requested = Some("nemo");
                     }
                 });
                 if let Some(id) = requested {
@@ -2398,6 +2648,17 @@ impl ScreenRecorderApp {
                                 "language",
                                 &mut self.settings.transcription.language,
                                 &["auto", "ru", "en"],
+                            ) {
+                                self.settings_dirty = true;
+                            }
+                            ui.end_row();
+
+                            ui.label("Диаризация:");
+                            if Self::combo(
+                                ui,
+                                "diarization_engine",
+                                &mut self.settings.diarization.engine,
+                                &["sherpa-onnx", "nemo"],
                             ) {
                                 self.settings_dirty = true;
                             }
@@ -2533,6 +2794,8 @@ impl eframe::App for ScreenRecorderApp {
         self.poll_preflight();
         self.poll_transcription();
         self.poll_job_queue();
+        self.poll_tray(ui.ctx());
+        self.poll_hotkeys();
         self.poll_download();
         self.poll_folder_picker();
         self.poll_probe();
@@ -2553,6 +2816,23 @@ impl eframe::App for ScreenRecorderApp {
         self.window_picker(ui.ctx());
         self.delete_window(ui.ctx());
         self.persist_settings();
+    }
+}
+
+/// Показывает системное уведомление.
+fn notify(title: &str, body: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("notify-send")
+            .args([title, body])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (title, body);
     }
 }
 

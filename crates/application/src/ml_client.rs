@@ -240,6 +240,119 @@ impl Drop for DiarizeWorker {
     }
 }
 
+/// Запущенный NeMo-воркер диаризации.
+pub struct NemoWorker {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    next_id: u64,
+}
+
+impl NemoWorker {
+    /// Запускает `screenrecorder-nemo`.
+    pub fn spawn(models_dir: &Path) -> Result<Self, String> {
+        let binary = find_nemo_binary()?;
+        let mut child = Command::new(&binary)
+            .env("SCREENRECORDER_MODELS_DIR", models_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("NeMo-воркер {}: {error}", binary.display()))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "NeMo-воркер: нет stdin".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "NeMo-воркер: нет stdout".to_string())?;
+        Ok(Self {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+            next_id: 1,
+        })
+    }
+
+    /// Размечает спикеров через NeMo Sortformer.
+    pub fn diarize(&mut self, audio: &Path) -> Result<Vec<SpeakerTurn>, String> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "diarize.run",
+            "params": {"audio_path": audio},
+        });
+        writeln!(self.stdin, "{request}").map_err(|error| format!("NeMo stdin: {error}"))?;
+        self.stdin
+            .flush()
+            .map_err(|error| format!("NeMo flush: {error}"))?;
+        let mut line = String::new();
+        let read = self
+            .stdout
+            .read_line(&mut line)
+            .map_err(|error| format!("NeMo stdout: {error}"))?;
+        if read == 0 {
+            let status = self.child.try_wait().ok().flatten();
+            return Err(format!("NeMo-воркер завершился: {status:?}"));
+        }
+        let response: serde_json::Value =
+            serde_json::from_str(&line).map_err(|error| format!("ответ NeMo: {error}"))?;
+        if let Some(error) = response.get("error") {
+            return Err(error
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or("ошибка NeMo")
+                .to_string());
+        }
+        let result = response
+            .get("result")
+            .cloned()
+            .ok_or_else(|| "NeMo-воркер вернул пустой ответ".to_string())?;
+        serde_json::from_value(result).map_err(|error| format!("сегменты NeMo: {error}"))
+    }
+}
+
+impl Drop for NemoWorker {
+    /// Завершает воркер при выходе.
+    fn drop(&mut self) {
+        let _ = writeln!(
+            self.stdin,
+            r#"{{"jsonrpc":"2.0","id":0,"method":"shutdown"}}"#
+        );
+        let _ = self.stdin.flush();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Ищет бинарник NeMo-воркера рядом с приложением.
+fn find_nemo_binary() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("SCREENRECORDER_NEMO_BIN") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(format!(
+            "SCREENRECORDER_NEMO_BIN указывает на несуществующий файл: {}",
+            path.display()
+        ));
+    }
+    let exe = std::env::current_exe().map_err(|error| format!("current_exe: {error}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "не удалось определить каталог приложения".to_string())?;
+    for name in ["screenrecorder-nemo", "screenrecorder-nemo.exe"] {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err("NeMo-воркер не найден; соберите screenrecorder-nemo".to_string())
+}
+
 /// Ищет бинарник воркера диаризации рядом с приложением.
 fn find_diarize_binary() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("SCREENRECORDER_DIARIZE_BIN") {

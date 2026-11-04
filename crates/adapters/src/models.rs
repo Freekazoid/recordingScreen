@@ -81,6 +81,16 @@ pub const MODELS: &[ModelSpec] = &[
         ],
     },
     ModelSpec {
+        id: "nemo",
+        title: "NeMo Sortformer",
+        files: &[ModelFile {
+            url: "https://huggingface.co/altunenes/parakeet-rs/resolve/main/nemotron-3-diarization/nemotron3_diar_v3.onnx",
+            file_name: "nemotron3_diar_v3.onnx",
+            size: 402_167_515,
+            sha256: "c32d6056f1ca52bdd50a74e1e7c66d91e5147bc29f19ffa4c39cbe5452397d15",
+        }],
+    },
+    ModelSpec {
         id: "vad",
         title: "Silero VAD (GGML)",
         files: &[ModelFile {

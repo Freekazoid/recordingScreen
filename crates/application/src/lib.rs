@@ -15,6 +15,7 @@ pub use manifest::{
     save_manifest,
 };
 pub use ml_client::{
-    DiarizeWorker, MlWorker, SpeakerTurn, Transcript, TranscriptSegment, assign_speakers,
+    DiarizeWorker, MlWorker, NemoWorker, SpeakerTurn, Transcript, TranscriptSegment,
+    assign_speakers,
 };
 pub use settings::{DEFAULT_SETTINGS_JSON, SCHEMA_VERSION, Settings, SettingsError, SettingsStore};

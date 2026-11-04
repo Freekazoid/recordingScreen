@@ -261,10 +261,13 @@ impl Settings {
                 reason: "допустимо auto, cpu или gpu".to_string(),
             });
         }
-        if !matches!(self.diarization.engine.as_str(), "sherpa-onnx" | "none") {
+        if !matches!(
+            self.diarization.engine.as_str(),
+            "sherpa-onnx" | "nemo" | "none"
+        ) {
             return Err(SettingsError::InvalidField {
                 field: "diarization.engine".to_string(),
-                reason: "допустимо sherpa-onnx или none".to_string(),
+                reason: "допустимо sherpa-onnx, nemo или none".to_string(),
             });
         }
         if let (Some(min), Some(max)) =
