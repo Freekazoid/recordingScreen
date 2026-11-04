@@ -126,36 +126,46 @@ async fn open_stream() -> Result<(Screencast, Session<Screencast>, OwnedFd, u32)
         .create_session(Default::default())
         .await
         .map_err(|error| format!("CreateSession: {error}"))?;
-    proxy
-        .select_sources(
-            &session,
-            SelectSourcesOptions::default()
-                .set_cursor_mode(CursorMode::Embedded)
-                .set_sources(ashpd::enumflags2::BitFlags::from(SourceType::Monitor))
-                .set_multiple(false)
-                .set_persist_mode(PersistMode::DoNot),
-        )
-        .await
-        .map_err(|error| format!("SelectSources: {error}"))?;
-    let response = proxy
-        .start(&session, None, Default::default())
-        .await
-        .map_err(|error| format!("Start: {error}"))?
-        .response()
-        .map_err(|error| match error {
-            ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => {
-                crate::capture::wayland::PORTAL_CANCELLED.to_string()
-            }
-            error => format!("Start response: {error}"),
-        })?;
-    let stream = response
-        .streams()
-        .first()
-        .ok_or_else(|| "портал не вернул поток".to_string())?;
-    let node_id = stream.pipe_wire_node_id();
-    let fd = proxy
-        .open_pipe_wire_remote(&session, Default::default())
-        .await
-        .map_err(|error| format!("OpenPipeWireRemote: {error}"))?;
-    Ok((proxy, session, fd, node_id))
+    let stream = async {
+        proxy
+            .select_sources(
+                &session,
+                SelectSourcesOptions::default()
+                    .set_cursor_mode(CursorMode::Embedded)
+                    .set_sources(ashpd::enumflags2::BitFlags::from(SourceType::Monitor))
+                    .set_multiple(false)
+                    .set_persist_mode(PersistMode::DoNot),
+            )
+            .await
+            .map_err(|error| format!("SelectSources: {error}"))?;
+        let response = proxy
+            .start(&session, None, Default::default())
+            .await
+            .map_err(|error| format!("Start: {error}"))?
+            .response()
+            .map_err(|error| match error {
+                ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => {
+                    crate::capture::wayland::PORTAL_CANCELLED.to_string()
+                }
+                error => format!("Start response: {error}"),
+            })?;
+        let stream = response
+            .streams()
+            .first()
+            .ok_or_else(|| "портал не вернул поток".to_string())?;
+        let node_id = stream.pipe_wire_node_id();
+        let fd = proxy
+            .open_pipe_wire_remote(&session, Default::default())
+            .await
+            .map_err(|error| format!("OpenPipeWireRemote: {error}"))?;
+        Ok::<_, String>((fd, node_id))
+    }
+    .await;
+    match stream {
+        Ok((fd, node_id)) => Ok((proxy, session, fd, node_id)),
+        Err(error) => {
+            let _ = tokio::time::timeout(Duration::from_secs(2), session.close()).await;
+            Err(error)
+        }
+    }
 }
