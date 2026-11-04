@@ -94,6 +94,8 @@ pub struct SessionManifest {
     pub warnings: Vec<String>,
     #[serde(default)]
     pub export_path: Option<String>,
+    #[serde(default)]
+    pub transcript_path: Option<String>,
 }
 
 impl SessionManifest {
@@ -122,6 +124,7 @@ impl SessionManifest {
             tracks: Vec::new(),
             warnings: Vec::new(),
             export_path: None,
+            transcript_path: None,
         }
     }
 
@@ -161,6 +164,12 @@ impl SessionManifest {
         if self.ended_at.is_none() {
             self.ended_at = Some(Utc::now());
         }
+    }
+
+    /// Сохраняет путь к готовому транскрипту.
+    pub fn set_transcript(&mut self, path: impl Into<String>) {
+        self.transcript_path = Some(path.into());
+        self.updated_at = Utc::now();
     }
 
     /// Помечает сессию прерванной.
