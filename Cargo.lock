@@ -3089,6 +3089,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "screenrecorder-ml-worker"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "screenrecorder-ml",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "screenrecorder-ui"
 version = "4.0.0-alpha.1"
 dependencies = [

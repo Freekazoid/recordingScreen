@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Freekazoid/recordingScreen/contracts/track.schema.json",
+  "title": "Track",
+  "type": "object",
+  "required": ["id", "session_id", "kind", "path", "status", "stats"],
+  "properties": {
+    "id": { "type": "string" },
+    "session_id": { "type": "string" },
+    "kind": {
+      "type": "string",
+      "enum": ["screen", "system", "mic", "mix"]
+    },
+    "device_id": { "type": ["string", "null"] },
+    "path": { "type": "string" },
+    "sample_rate": { "type": ["integer", "null"], "minimum": 8000 },
+    "channels": { "type": ["integer", "null"], "minimum": 1, "maximum": 2 },
+    "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+    "start_offset_ms": { "type": "integer" },
+    "stats": {
+      "type": "object",
+      "required": ["rms_dbfs", "peak_dbfs", "silence_ratio", "clipping_ratio"],
+      "properties": {
+        "rms_dbfs": { "type": "number" },
+        "peak_dbfs": { "type": "number" },
+        "silence_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+        "clipping_ratio": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pending", "recording", "ready", "silent", "failed"]
+    }
+  },
+  "additionalProperties": false
+}
