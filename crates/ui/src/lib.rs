@@ -2884,6 +2884,9 @@ impl eframe::App for ScreenRecorderApp {
         self.window_picker(ui.ctx());
         self.delete_window(ui.ctx());
         self.persist_settings();
+        if self.hotkey_toggle.is_some() || self.tray.is_some() {
+            ui.ctx().request_repaint_after(Duration::from_millis(200));
+        }
     }
 }
 
