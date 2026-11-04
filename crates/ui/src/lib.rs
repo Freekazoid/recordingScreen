@@ -42,6 +42,13 @@ enum DownloadEvent {
     Finished(Result<(), String>),
 }
 
+/// Прогресс ML-воркера.
+struct ProgressInfo {
+    stage: String,
+    percent: f32,
+    pid: u32,
+}
+
 /// Результат фонового распознавания.
 struct TranscriptOutput {
     text_path: PathBuf,
@@ -161,6 +168,9 @@ pub struct ScreenRecorderApp {
     preflight_warnings: Vec<String>,
     transcript_rx: Option<Receiver<Result<TranscriptOutput, String>>>,
     transcribing: bool,
+    ml_progress: Option<ProgressInfo>,
+    last_progress_poll: Instant,
+    cancel_requested: bool,
     history: HistoryStore,
     history_records: Vec<SessionRecord>,
     export_job: Option<JobRecord>,
@@ -270,6 +280,9 @@ impl ScreenRecorderApp {
             preflight_warnings: Vec::new(),
             transcript_rx: None,
             transcribing: false,
+            ml_progress: None,
+            last_progress_poll: Instant::now(),
+            cancel_requested: false,
             history,
             history_records,
             export_job: None,
@@ -1713,8 +1726,49 @@ impl ScreenRecorderApp {
         });
         self.transcript_rx = Some(receiver);
         self.transcribing = true;
+        self.ml_progress = None;
+        self.last_progress_poll = Instant::now();
+        self.cancel_requested = false;
+        let _ = std::fs::remove_file(session_dir.join("progress.json"));
         self.transcription_job = self.activate_job(queued, session_dir, "transcribe");
         self.status = "Распознавание речи…".to_string();
+    }
+
+    /// Читает прогресс ML-воркера из файла сессии.
+    fn poll_ml_progress(&mut self) {
+        if !self.transcribing {
+            self.ml_progress = None;
+            return;
+        }
+        if self.last_progress_poll.elapsed() < Duration::from_millis(200) {
+            return;
+        }
+        self.last_progress_poll = Instant::now();
+        if let Some(dir) = &self.session_dir {
+            self.ml_progress = read_progress(&dir.join("progress.json"));
+        }
+    }
+
+    /// Отменяет текущее распознавание, завершая ML-воркер.
+    fn cancel_ml(&mut self) {
+        let pid = self
+            .ml_progress
+            .as_ref()
+            .map(|progress| progress.pid)
+            .or_else(|| {
+                self.session_dir
+                    .as_ref()
+                    .and_then(|dir| read_progress(&dir.join("progress.json")))
+                    .map(|progress| progress.pid)
+            });
+        if let Some(pid) = pid.filter(|pid| *pid > 0) {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
+        }
+        self.cancel_requested = true;
+        self.status = "Отмена распознавания…".to_string();
     }
 
     /// Забирает результат распознавания.
@@ -1726,17 +1780,53 @@ impl ScreenRecorderApp {
                 Err(TryRecvError::Disconnected) => {
                     self.transcript_rx = None;
                     self.transcribing = false;
-                    self.status = "Распознавание прервано".to_string();
+                    let was_cancelled = self.cancel_requested;
+                    self.cancel_requested = false;
+                    self.ml_progress = None;
+                    if let Some(dir) = &self.session_dir {
+                        let _ = std::fs::remove_file(dir.join("progress.json"));
+                    }
+                    let job = self.transcription_job.take();
+                    self.finish_job(
+                        job,
+                        Err(if was_cancelled {
+                            "отменено пользователем".to_string()
+                        } else {
+                            "поток распознавания завершился".to_string()
+                        }),
+                    );
+                    if was_cancelled {
+                        self.status = "Распознавание отменено".to_string();
+                        self.log = "Распознавание остановлено пользователем.".to_string();
+                    } else {
+                        self.status = "Распознавание прервано".to_string();
+                    }
                     return;
                 }
             },
             None => return,
         };
         self.transcript_rx = None;
+        let was_cancelled = self.cancel_requested;
+        self.cancel_requested = false;
         self.transcribing = false;
-        let job_result = result.as_ref().map(|_| ()).map_err(|error| error.clone());
+        self.ml_progress = None;
+        if let Some(dir) = &self.session_dir {
+            let _ = std::fs::remove_file(dir.join("progress.json"));
+        }
+        let job_result = if was_cancelled {
+            Err("отменено пользователем".to_string())
+        } else {
+            result.as_ref().map(|_| ()).map_err(|error| error.clone())
+        };
         let job = self.transcription_job.take();
         self.finish_job(job, job_result);
+        if was_cancelled {
+            self.status = "Распознавание отменено".to_string();
+            self.log = "Распознавание остановлено пользователем.".to_string();
+            notify("Screen Recorder", "Распознавание отменено");
+            return;
+        }
         match result {
             Ok(output) => {
                 self.status = "Транскрипция готова".to_string();
@@ -2036,18 +2126,6 @@ impl ScreenRecorderApp {
         );
     }
 
-    /// Рисует строку состояния моделей.
-    fn status_row(&self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(32.0, 24.0), Sense::hover());
-            let ready = self.recording || self.model_manager.is_downloaded("whisper");
-            let color = if ready { GREEN } else { RED };
-            ui.painter().circle_filled(rect.center(), 9.0, color);
-            ui.add_space(4.0);
-            ui.add(egui::Label::new(RichText::new(&self.status).size(14.0).color(TEXT)).wrap());
-        });
-    }
-
     /// Рисует вкладки в стиле текущего приложения.
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         let width = ui.available_width() / 4.0;
@@ -2330,7 +2408,6 @@ impl ScreenRecorderApp {
 
     /// Рисует вкладку «Запись».
     fn draw_record(&mut self, ui: &mut egui::Ui) {
-        self.status_row(ui);
         if self.recording {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -2476,12 +2553,28 @@ impl ScreenRecorderApp {
         ui.label(RichText::new(detail).size(11.0).color(HINT));
         if active {
             ui.add_space(2.0);
-            ui.add(
-                egui::ProgressBar::new(0.0)
-                    .animate(true)
-                    .desired_width(ui.available_width())
-                    .text(title),
-            );
+            if let Some(progress) = self.ml_progress.as_ref().filter(|_| self.transcribing) {
+                let stage = match progress.stage.as_str() {
+                    "asr" => "Whisper",
+                    "diarization" => "Диаризация",
+                    _ => "Обработка",
+                };
+                ui.add(
+                    egui::ProgressBar::new((progress.percent / 100.0).clamp(0.0, 1.0))
+                        .desired_width(ui.available_width())
+                        .text(format!("{stage} · {:.0}%", progress.percent)),
+                );
+            } else {
+                ui.add(
+                    egui::ProgressBar::new(0.0)
+                        .animate(true)
+                        .desired_width(ui.available_width())
+                        .text(title),
+                );
+            }
+        }
+        if self.transcribing && ui.button("Отменить распознавание").clicked() {
+            self.cancel_ml();
         }
         if !self.queued_jobs.is_empty() {
             ui.label(
@@ -2812,10 +2905,10 @@ impl ScreenRecorderApp {
                 Self::section(ui, "Модели", |ui| {
                     match Self::model_row(
                         ui,
-                        "Whisper",
+                        "Whisper large-v3-turbo",
                         whisper_ready,
                         whisper_progress,
-                        &format!("large-v3-turbo · {whisper_size} · ASR"),
+                        &format!("распознавание речи · {whisper_size}"),
                     ) {
                         Some(ModelAction::Download) => requested = Some("whisper"),
                         Some(ModelAction::Delete) => delete_requested = Some("whisper"),
@@ -2824,10 +2917,10 @@ impl ScreenRecorderApp {
                     ui.add_space(4.0);
                     match Self::model_row(
                         ui,
-                        "Диаризация",
+                        "sherpa-onnx",
                         diarization_ready,
                         diarization_progress,
-                        &format!("sherpa-onnx · {diarization_size} · спикеры"),
+                        &format!("диаризация: сегментация + эмбеддинги · {diarization_size}"),
                     ) {
                         Some(ModelAction::Download) => requested = Some("diarization"),
                         Some(ModelAction::Delete) => delete_requested = Some("diarization"),
@@ -2839,7 +2932,7 @@ impl ScreenRecorderApp {
                         "Silero VAD",
                         vad_ready,
                         vad_progress,
-                        &format!("silero-v5.1.2 · {vad_size} · паузы речи"),
+                        &format!("определение пауз речи · {vad_size}"),
                     ) {
                         Some(ModelAction::Download) => requested = Some("vad"),
                         Some(ModelAction::Delete) => delete_requested = Some("vad"),
@@ -2851,7 +2944,7 @@ impl ScreenRecorderApp {
                         "NeMo Sortformer",
                         nemo_ready,
                         nemo_progress,
-                        &format!("Nemotron-3 · {nemo_size} · спикеры"),
+                        &format!("диаризация: до 8 спикеров · {nemo_size}"),
                     ) {
                         Some(ModelAction::Download) => requested = Some("nemo"),
                         Some(ModelAction::Delete) => delete_requested = Some("nemo"),
@@ -3080,6 +3173,7 @@ impl eframe::App for ScreenRecorderApp {
         self.poll_recording();
         self.poll_preflight();
         self.poll_transcription();
+        self.poll_ml_progress();
         self.poll_job_queue();
         self.poll_tray(ui.ctx());
         self.poll_hotkeys(ui.ctx());
@@ -3108,6 +3202,17 @@ impl eframe::App for ScreenRecorderApp {
             ui.ctx().request_repaint_after(Duration::from_millis(200));
         }
     }
+}
+
+/// Читает progress.json ML-воркера.
+fn read_progress(path: &Path) -> Option<ProgressInfo> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    Some(ProgressInfo {
+        stage: value.get("stage")?.as_str()?.to_string(),
+        percent: value.get("percent")?.as_f64()? as f32,
+        pid: value.get("pid")?.as_u64()? as u32,
+    })
 }
 
 /// Форматирует размер файла в мегабайтах.

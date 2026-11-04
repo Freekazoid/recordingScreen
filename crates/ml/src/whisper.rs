@@ -3,9 +3,29 @@
 use crate::audio::load_wav_16k_mono;
 use crate::{MlError, Transcript, TranscriptSegment};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperVadParams,
 };
+
+/// Пишет прогресс ML-задачи рядом с аудиофайлом.
+///
+/// UI читает этот файл и показывает процент, а также PID для отмены.
+pub fn write_progress_file(audio: &Path, stage: &str, percent: u8) {
+    let Some(dir) = audio.parent() else {
+        return;
+    };
+    let path = dir.join("progress.json");
+    let temp = dir.join("progress.json.tmp");
+    let data = format!(
+        r#"{{"stage":"{stage}","percent":{},"pid":{}}}"#,
+        percent.min(100),
+        std::process::id()
+    );
+    if std::fs::write(&temp, data).is_ok() {
+        let _ = std::fs::rename(&temp, &path);
+    }
+}
 
 /// Движок распознавания речи с кэшем загруженной модели.
 pub struct WhisperEngine {
@@ -46,6 +66,20 @@ impl WhisperEngine {
         language: Option<&str>,
         timestamps: bool,
     ) -> Result<Transcript, MlError> {
+        self.transcribe_with_progress(audio_path, language, timestamps, |_| {})
+    }
+
+    /// Распознаёт WAV и сообщает прогресс в процентах.
+    pub fn transcribe_with_progress<F>(
+        &mut self,
+        audio_path: &Path,
+        language: Option<&str>,
+        timestamps: bool,
+        progress: F,
+    ) -> Result<Transcript, MlError>
+    where
+        F: Fn(u8) + Send + Sync + 'static,
+    {
         if !self.is_ready() {
             return Err(MlError::ModelUnavailable(
                 self.model_path.display().to_string(),
@@ -55,16 +89,21 @@ impl WhisperEngine {
         if samples.is_empty() {
             return Err(MlError::Inference("аудиофайл пуст".to_string()));
         }
-        self.transcribe_samples(&samples, language, timestamps)
+        self.transcribe_samples(&samples, language, timestamps, progress)
     }
 
     /// Распознаёт переданный PCM-буфер.
-    fn transcribe_samples(
+    fn transcribe_samples<F>(
         &mut self,
         samples: &[f32],
         language: Option<&str>,
         timestamps: bool,
-    ) -> Result<Transcript, MlError> {
+        progress: F,
+    ) -> Result<Transcript, MlError>
+    where
+        F: Fn(u8) + Send + Sync + 'static,
+    {
+        let progress = Arc::new(progress);
         let vad_path = self
             .vad_path
             .as_ref()
@@ -89,6 +128,10 @@ impl WhisperEngine {
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
         params.set_token_timestamps(timestamps);
+        let callback = Arc::clone(&progress);
+        params.set_progress_callback_safe(move |value: i32| {
+            callback(value.clamp(0, 100) as u8);
+        });
         state
             .full(params, samples)
             .map_err(|error| MlError::Inference(format!("whisper: {error}")))?;
@@ -112,6 +155,7 @@ impl WhisperEngine {
                 speaker: None,
             });
         }
+        progress(100);
         Ok(Transcript {
             language: language.unwrap_or("auto").to_string(),
             segments,

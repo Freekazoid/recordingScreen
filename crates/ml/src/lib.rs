@@ -11,6 +11,7 @@ pub mod audio;
 pub mod whisper;
 
 pub use whisper::WhisperEngine;
+pub use whisper::write_progress_file;
 
 /// Ошибки ML-слоя.
 #[derive(Debug, Error)]

@@ -152,10 +152,13 @@ impl Server {
         let engine = self
             .asr
             .get_or_insert_with(|| WhisperEngine::with_vad(&model, vad));
-        match engine.transcribe(
+        let progress_path = params.audio_path.clone();
+        screenrecorder_ml::write_progress_file(&progress_path, "asr", 0);
+        match engine.transcribe_with_progress(
             &params.audio_path,
             params.language.as_deref(),
             params.timestamps.unwrap_or(true),
+            move |percent| screenrecorder_ml::write_progress_file(&progress_path, "asr", percent),
         ) {
             Ok(transcript) => match serde_json::to_value(transcript) {
                 Ok(value) => RpcResponse::ok(id, value),

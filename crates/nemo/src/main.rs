@@ -61,11 +61,15 @@ impl Server {
                 let engine = self
                     .engine
                     .get_or_insert_with(|| NemoDiarizer::new(&self.model_path));
+                write_progress(&params.audio_path, "diarization", 0);
                 match engine.diarize(&params.audio_path) {
-                    Ok(turns) => match serde_json::to_value(turns) {
-                        Ok(value) => success(id, value),
-                        Err(error) => rpc_error(id, -32603, format!("сериализация: {error}")),
-                    },
+                    Ok(turns) => {
+                        write_progress(&params.audio_path, "diarization", 100);
+                        match serde_json::to_value(turns) {
+                            Ok(value) => success(id, value),
+                            Err(error) => rpc_error(id, -32603, format!("сериализация: {error}")),
+                        }
+                    }
                     Err(error) => rpc_error(id, -32002, error.to_string()),
                 }
             }
@@ -76,6 +80,23 @@ impl Server {
             other => rpc_error(id, -32601, format!("неизвестный метод: {other}")),
         };
         Some(response)
+    }
+}
+
+/// Пишет прогресс рядом с аудиофайлом.
+fn write_progress(audio: &std::path::Path, stage: &str, percent: u8) {
+    let Some(dir) = audio.parent() else {
+        return;
+    };
+    let path = dir.join("progress.json");
+    let temp = dir.join("progress.json.tmp");
+    let data = format!(
+        r#"{{"stage":"{stage}","percent":{},"pid":{}}}"#,
+        percent.min(100),
+        std::process::id()
+    );
+    if std::fs::write(&temp, data).is_ok() {
+        let _ = std::fs::rename(&temp, &path);
     }
 }
 
