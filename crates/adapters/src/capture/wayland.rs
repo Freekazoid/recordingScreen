@@ -252,8 +252,9 @@ fn build_gst_args(fd: i32, node_id: u32, output: &Path, fps: u32) -> Vec<String>
         "!".to_string(),
         "videoconvert".to_string(),
         "!".to_string(),
-        "video/x-raw,format=I420".to_string(),
-        format!("framerate={fps}/1"),
+        "videorate".to_string(),
+        "!".to_string(),
+        format!("video/x-raw,format=I420,framerate={fps}/1"),
         "!".to_string(),
         "x264enc".to_string(),
         "tune=zerolatency".to_string(),
@@ -304,6 +305,8 @@ mod tests {
         assert!(args.contains(&"pipewiresrc".to_string()));
         assert!(args.contains(&"fd=7".to_string()));
         assert!(args.contains(&"path=42".to_string()));
+        assert!(args.contains(&"videorate".to_string()));
+        assert!(args.contains(&"video/x-raw,format=I420,framerate=20/1".to_string()));
         assert!(args.contains(&"filesink".to_string()));
         assert!(args.contains(&"location=/tmp/out.mkv".to_string()));
     }

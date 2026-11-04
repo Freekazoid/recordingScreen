@@ -815,14 +815,25 @@ impl ScreenRecorderApp {
         });
 
         ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
-            ui.add(
-                egui::TextEdit::multiline(&mut self.log)
-                    .desired_rows(4)
-                    .font(TextStyle::Monospace)
-                    .text_color(LOG_TEXT)
-                    .interactive(false)
-                    .frame(egui::Frame::NONE.fill(BG)),
-            );
+            if ui.button("Копировать журнал").clicked() {
+                ui.ctx().copy_text(self.log.clone());
+            }
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical()
+                .max_height(88.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&self.log)
+                                .monospace()
+                                .size(12.0)
+                                .color(LOG_TEXT),
+                        )
+                        .selectable(true)
+                        .wrap(),
+                    );
+                });
         });
     }
 
