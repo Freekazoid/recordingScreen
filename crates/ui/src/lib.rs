@@ -187,10 +187,12 @@ impl ScreenRecorderApp {
         title: &str,
         add_contents: impl FnOnce(&mut egui::Ui) -> R,
     ) -> R {
+        let width = ui.available_width();
         egui::Frame::NONE
             .stroke(Stroke::new(1.0, BTN))
             .inner_margin(Margin::same(8))
             .show(ui, |ui| {
+                ui.set_min_width((width - 16.0).max(0.0));
                 ui.label(RichText::new(title).strong().color(TEXT));
                 add_contents(ui)
             })
@@ -200,7 +202,7 @@ impl ScreenRecorderApp {
     /// Рисует выпадающий список.
     fn combo(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[&str]) {
         egui::ComboBox::from_id_salt(id)
-            .width(200.0)
+            .width(210.0)
             .selected_text(value.clone())
             .show_ui(ui, |ui| {
                 for option in options {
@@ -342,109 +344,113 @@ impl ScreenRecorderApp {
 
     /// Рисует вкладку «Настройки».
     fn draw_settings(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            Self::section(ui, "Модели", |ui| {
-                Self::model_row(ui, "Whisper", false, "large-v3-turbo · whisper.cpp");
-                ui.add_space(4.0);
-                Self::model_row(
-                    ui,
-                    "Диаризация",
-                    false,
-                    "sherpa-onnx · сегментация + эмбеддинги",
-                );
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                Self::section(ui, "Модели", |ui| {
+                    Self::model_row(ui, "Whisper", false, "large-v3-turbo · whisper.cpp");
+                    ui.add_space(4.0);
+                    Self::model_row(
+                        ui,
+                        "Диаризация",
+                        false,
+                        "sherpa-onnx · сегментация + эмбеддинги",
+                    );
+                });
+
+                ui.add_space(6.0);
+                Self::section(ui, "Распознавание", |ui| {
+                    egui::Grid::new("settings_grid")
+                        .num_columns(2)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("Транскрипция:");
+                            Self::combo(
+                                ui,
+                                "transcription_engine",
+                                &mut self.settings.transcription.engine,
+                                &["whisper-rs"],
+                            );
+                            ui.end_row();
+
+                            ui.label("Спикеры:");
+                            Self::combo(
+                                ui,
+                                "diarization_engine",
+                                &mut self.settings.diarization.engine,
+                                &["sherpa-onnx", "none"],
+                            );
+                            ui.end_row();
+
+                            ui.label("Устройство:");
+                            Self::combo(
+                                ui,
+                                "compute_device",
+                                &mut self.settings.transcription.compute_device,
+                                &["auto", "cpu", "gpu"],
+                            );
+                            ui.end_row();
+
+                            ui.label("Язык:");
+                            Self::combo(
+                                ui,
+                                "language",
+                                &mut self.settings.transcription.language,
+                                &["auto", "ru", "en"],
+                            );
+                            ui.end_row();
+                        });
+
+                    ui.add_space(4.0);
+                    ui.checkbox(
+                        &mut self.settings.transcription.enabled,
+                        "Включить транскрипцию",
+                    );
+                    ui.checkbox(
+                        &mut self.settings.diarization.enabled,
+                        "Включить диаризацию",
+                    );
+                });
+
+                ui.add_space(6.0);
+                Self::section(ui, "Папки", |ui| {
+                    ui.label("Папка моделей:");
+                    ui.add_sized(
+                        [ui.available_width(), 26.0],
+                        egui::TextEdit::singleline(&mut self.settings.models_dir)
+                            .hint_text("по умолчанию"),
+                    );
+                    ui.add_space(4.0);
+                    ui.label("Папка результатов:");
+                    ui.add_sized(
+                        [ui.available_width(), 26.0],
+                        egui::TextEdit::singleline(&mut self.settings.output_dir)
+                            .hint_text("по умолчанию"),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!("Файл: {}", self.paths.settings_path().display()))
+                            .size(11.0)
+                            .color(HINT),
+                    );
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Сохранить настройки").clicked() {
+                        let store = SettingsStore::new(self.paths.settings_path());
+                        self.status = match store.save(&self.settings) {
+                            Ok(()) => "Настройки сохранены".to_string(),
+                            Err(error) => format!("Ошибка сохранения: {error}"),
+                        };
+                    }
+                    if ui.button("Проверить систему").clicked() {
+                        self.status = self.diagnostics();
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label(RichText::new(&self.status).color(HINT));
             });
-
-            ui.add_space(6.0);
-            Self::section(ui, "Распознавание", |ui| {
-                egui::Grid::new("settings_grid")
-                    .num_columns(2)
-                    .spacing([8.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.label("Транскрипция:");
-                        Self::combo(
-                            ui,
-                            "transcription_engine",
-                            &mut self.settings.transcription.engine,
-                            &["whisper-rs"],
-                        );
-                        ui.end_row();
-
-                        ui.label("Спикеры:");
-                        Self::combo(
-                            ui,
-                            "diarization_engine",
-                            &mut self.settings.diarization.engine,
-                            &["sherpa-onnx", "none"],
-                        );
-                        ui.end_row();
-
-                        ui.label("Устройство:");
-                        Self::combo(
-                            ui,
-                            "compute_device",
-                            &mut self.settings.transcription.compute_device,
-                            &["auto", "cpu", "gpu"],
-                        );
-                        ui.end_row();
-
-                        ui.label("Язык:");
-                        Self::combo(
-                            ui,
-                            "language",
-                            &mut self.settings.transcription.language,
-                            &["auto", "ru", "en"],
-                        );
-                        ui.end_row();
-                    });
-
-                ui.add_space(4.0);
-                ui.checkbox(
-                    &mut self.settings.transcription.enabled,
-                    "Включить транскрипцию",
-                );
-                ui.checkbox(
-                    &mut self.settings.diarization.enabled,
-                    "Включить диаризацию",
-                );
-            });
-
-            ui.add_space(6.0);
-            Self::section(ui, "Папки", |ui| {
-                ui.label("Папка моделей:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.settings.models_dir)
-                        .hint_text("по умолчанию"),
-                );
-                ui.add_space(4.0);
-                ui.label("Папка результатов:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.settings.output_dir)
-                        .hint_text("по умолчанию"),
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(format!("Файл: {}", self.paths.settings_path().display()))
-                        .size(11.0)
-                        .color(HINT),
-                );
-            });
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Сохранить настройки").clicked() {
-                    let store = SettingsStore::new(self.paths.settings_path());
-                    self.status = match store.save(&self.settings) {
-                        Ok(()) => "Настройки сохранены".to_string(),
-                        Err(error) => format!("Ошибка сохранения: {error}"),
-                    };
-                }
-                if ui.button("Проверить систему").clicked() {
-                    self.status = self.diagnostics();
-                }
-            });
-            ui.add_space(6.0);
-            ui.label(RichText::new(&self.status).color(HINT));
-        });
     }
 
     /// Рисует вкладку «О авторе».
