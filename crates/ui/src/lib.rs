@@ -244,7 +244,7 @@ impl ScreenRecorderApp {
             log,
             output_format: "mp4".to_string(),
             video_quality: "Хорошее (CRF 23)".to_string(),
-            audio_track_mode: "Как есть (без пережатия)".to_string(),
+            audio_track_mode: "Без пережатия".to_string(),
             recorder: X11VideoRecorder::new(),
             wayland_recorder: WaylandPortalRecorder::new(),
             using_wayland: false,
@@ -469,6 +469,13 @@ impl ScreenRecorderApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                if is_wayland() {
+                    // winit на Wayland игнорирует разворачивание окна;
+                    // xdg-activation поднимает его через запрос внимания.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                        egui::UserAttentionType::Critical,
+                    ));
+                }
             }
             TrayCommand::Quit => {
                 self.allow_close = true;
@@ -2237,8 +2244,9 @@ impl ScreenRecorderApp {
     fn combo(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[&str]) -> bool {
         let mut changed = false;
         egui::ComboBox::from_id_salt(id)
-            .width(180.0)
+            .width(200.0)
             .selected_text(value.clone())
+            .truncate()
             .show_ui(ui, |ui| {
                 for option in options {
                     if ui
@@ -2262,6 +2270,7 @@ impl ScreenRecorderApp {
             } else {
                 "sherpa-onnx"
             })
+            .truncate()
             .show_ui(ui, |ui| {
                 if ui
                     .selectable_value(value, "sherpa-onnx".to_string(), "sherpa-onnx · быстрый")
@@ -2542,7 +2551,8 @@ impl ScreenRecorderApp {
         Self::section(ui, "Формат и сжатие", |ui| {
             egui::Grid::new("export_grid")
                 .num_columns(2)
-                .spacing([8.0, 6.0])
+                .min_col_width(150.0)
+                .spacing([10.0, 8.0])
                 .show(ui, |ui| {
                     ui.label("Формат файла:");
                     Self::combo(
@@ -2572,7 +2582,7 @@ impl ScreenRecorderApp {
                         ui,
                         "audio_track_mode",
                         &mut self.audio_track_mode,
-                        &["Как есть (без пережатия)", "Сжать (AAC 128k)", "Без звука"],
+                        &["Без пережатия", "Сжать (AAC 128k)", "Без звука"],
                     );
                     ui.end_row();
                 });
@@ -3073,7 +3083,8 @@ impl ScreenRecorderApp {
                 Self::section(ui, "Параметры", |ui| {
                     egui::Grid::new("settings_grid")
                         .num_columns(2)
-                        .spacing([8.0, 6.0])
+                        .min_col_width(120.0)
+                        .spacing([10.0, 8.0])
                         .show(ui, |ui| {
                             ui.label("Устройство:");
                             if Self::combo(
@@ -3229,8 +3240,15 @@ impl ScreenRecorderApp {
         if ctx.input(|input| input.viewport().close_requested()) && !self.allow_close {
             if self.tray.is_some() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                notify("Screen Recorder", "Приложение свёрнуто в трей");
+                if is_wayland() {
+                    // Wayland не умеет скрывать обычное окно: set_visible там
+                    // no-op. Сворачиваем в панель задач, процесс продолжает
+                    // работать, трей и запись остаются доступны.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                } else {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+                notify("Screen Recorder", "Приложение свёрнуто");
             } else {
                 // Если трей не создался, скрывать окно нельзя: пользователь
                 // не сможет вернуть приложение.
@@ -3280,6 +3298,14 @@ impl eframe::App for ScreenRecorderApp {
         self.window_picker(ui.ctx());
         self.delete_window(ui.ctx());
     }
+}
+
+/// Проверяет, что приложение работает через Wayland.
+///
+/// На Wayland нельзя скрыть обычное окно (`set_visible` — no-op),
+/// поэтому close-to-tray сворачивает его в панель задач.
+fn is_wayland() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
 /// Формирует подпись пункта меню трея.
