@@ -9,10 +9,17 @@ use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke,
     TextStyle, Vec2,
 };
-use screenrecorder_adapters::{Paths, X11VideoRecorder};
+use screenrecorder_adapters::{DownloadProgress, ModelManager, Paths, X11VideoRecorder};
 use screenrecorder_application::{Settings, SettingsStore};
 use screenrecorder_domain::SessionId;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
+
+/// События фоновой загрузки модели.
+enum DownloadEvent {
+    Progress(DownloadProgress),
+    Finished(Result<(), String>),
+}
 
 const BG: Color32 = Color32::from_rgb(0x20, 0x20, 0x20);
 const TEXT: Color32 = Color32::from_rgb(0xcc, 0xca, 0xca);
@@ -46,11 +53,16 @@ pub struct ScreenRecorderApp {
     recorder: X11VideoRecorder,
     recording: bool,
     session_dir: Option<PathBuf>,
+    model_manager: ModelManager,
+    download_rx: Option<Receiver<DownloadEvent>>,
+    download_model: Option<&'static str>,
+    download_progress: f32,
 }
 
 impl ScreenRecorderApp {
     /// Создаёт приложение с уже загруженными настройками и путями.
     pub fn new(paths: Paths, settings: Settings) -> Self {
+        let model_manager = ModelManager::new(paths.models_dir());
         Self {
             paths,
             settings,
@@ -63,6 +75,71 @@ impl ScreenRecorderApp {
             recorder: X11VideoRecorder::new(),
             recording: false,
             session_dir: None,
+            model_manager,
+            download_rx: None,
+            download_model: None,
+            download_progress: 0.0,
+        }
+    }
+
+    /// Запускает скачивание модели в фоне.
+    fn start_download(&mut self, id: &'static str) {
+        if self.download_rx.is_some() {
+            self.log = "Другая модель уже скачивается.".to_string();
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let manager = self.model_manager.clone();
+        let model_id = id.to_string();
+        std::thread::spawn(move || {
+            let mut last_percent = -1.0_f32;
+            let result = manager.download(&model_id, |progress| {
+                if progress.percent - last_percent >= 0.5 || progress.percent >= 100.0 {
+                    last_percent = progress.percent;
+                    let _ = sender.send(DownloadEvent::Progress(progress));
+                }
+            });
+            let _ = sender.send(DownloadEvent::Finished(
+                result.map_err(|error| error.to_string()),
+            ));
+        });
+        self.download_rx = Some(receiver);
+        self.download_model = Some(id);
+        self.download_progress = 0.0;
+        self.status = format!("Скачивание модели: {id}");
+        self.log = format!("Начато скачивание модели {id}.");
+    }
+
+    /// Обрабатывает события фоновой загрузки.
+    fn poll_download(&mut self) {
+        let events: Vec<DownloadEvent> = match &self.download_rx {
+            Some(receiver) => std::iter::from_fn(|| receiver.try_recv().ok()).collect(),
+            None => return,
+        };
+        for event in events {
+            match event {
+                DownloadEvent::Progress(progress) => {
+                    self.download_progress = progress.percent;
+                    self.status = format!(
+                        "Скачивание: {} · {:.1}%",
+                        progress.model_id, progress.percent
+                    );
+                }
+                DownloadEvent::Finished(Ok(())) => {
+                    self.status = "Модель скачана".to_string();
+                    self.log = "Загрузка модели завершена.".to_string();
+                    self.download_rx = None;
+                    self.download_model = None;
+                    self.download_progress = 0.0;
+                }
+                DownloadEvent::Finished(Err(error)) => {
+                    self.status = format!("Ошибка загрузки: {error}");
+                    self.log = format!("Не удалось скачать модель: {error}");
+                    self.download_rx = None;
+                    self.download_model = None;
+                    self.download_progress = 0.0;
+                }
+            }
         }
     }
 
@@ -134,7 +211,8 @@ impl ScreenRecorderApp {
     fn status_row(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(Vec2::new(32.0, 24.0), Sense::hover());
-            let color = if self.recording { GREEN } else { RED };
+            let ready = self.recording || self.model_manager.is_downloaded("whisper");
+            let color = if ready { GREEN } else { RED };
             ui.painter().circle_filled(rect.center(), 9.0, color);
             ui.add_space(4.0);
             ui.label(RichText::new(&self.status).size(14.0).color(TEXT));
@@ -144,6 +222,7 @@ impl ScreenRecorderApp {
     /// Рисует вкладки в стиле текущего приложения.
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         let width = ui.available_width() / 3.0;
+        let previous_spacing = ui.spacing().item_spacing.x;
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.horizontal(|ui| {
             for (screen, label) in [
@@ -169,6 +248,7 @@ impl ScreenRecorderApp {
                 }
             }
         });
+        ui.spacing_mut().item_spacing.x = previous_spacing;
     }
 
     /// Рисует кнопку режима записи с иконкой.
@@ -212,7 +292,14 @@ impl ScreenRecorderApp {
     }
 
     /// Рисует строку модели в настройках.
-    fn model_row(ui: &mut egui::Ui, title: &str, ready: bool, description: &str) {
+    fn model_row(
+        ui: &mut egui::Ui,
+        title: &str,
+        ready: bool,
+        progress: Option<f32>,
+        description: &str,
+    ) -> bool {
+        let mut clicked = false;
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(Vec2::new(20.0, 20.0), Sense::hover());
             ui.painter()
@@ -222,9 +309,20 @@ impl ScreenRecorderApp {
                 ui.label(RichText::new(description).size(11.0).color(HINT));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_enabled(false, egui::Button::new("Скачать"));
+                if ready {
+                    ui.label(RichText::new("Готово").color(GREEN));
+                } else if let Some(percent) = progress {
+                    ui.add(
+                        egui::ProgressBar::new((percent / 100.0).clamp(0.0, 1.0))
+                            .desired_width(110.0)
+                            .show_percentage(),
+                    );
+                } else if ui.button("Скачать").clicked() {
+                    clicked = true;
+                }
             });
         });
+        clicked
     }
 
     /// Рисует вкладку «Запись».
@@ -344,19 +442,41 @@ impl ScreenRecorderApp {
 
     /// Рисует вкладку «Настройки».
     fn draw_settings(&mut self, ui: &mut egui::Ui) {
+        let whisper_ready = self.model_manager.is_downloaded("whisper");
+        let diarization_ready = self.model_manager.is_downloaded("diarization");
+        let whisper_progress =
+            (self.download_model == Some("whisper")).then_some(self.download_progress);
+        let diarization_progress =
+            (self.download_model == Some("diarization")).then_some(self.download_progress);
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                let mut requested: Option<&'static str> = None;
                 Self::section(ui, "Модели", |ui| {
-                    Self::model_row(ui, "Whisper", false, "large-v3-turbo · whisper.cpp");
+                    if Self::model_row(
+                        ui,
+                        "Whisper",
+                        whisper_ready,
+                        whisper_progress,
+                        "large-v3-turbo · whisper.cpp",
+                    ) {
+                        requested = Some("whisper");
+                    }
                     ui.add_space(4.0);
-                    Self::model_row(
+                    if Self::model_row(
                         ui,
                         "Диаризация",
-                        false,
+                        diarization_ready,
+                        diarization_progress,
                         "sherpa-onnx · сегментация + эмбеддинги",
-                    );
+                    ) {
+                        requested = Some("diarization");
+                    }
                 });
+                if let Some(id) = requested {
+                    self.start_download(id);
+                }
 
                 ui.add_space(6.0);
                 Self::section(ui, "Распознавание", |ui| {
@@ -516,6 +636,7 @@ impl eframe::App for ScreenRecorderApp {
     /// Обновляет интерфейс на каждом кадре.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_recording();
+        self.poll_download();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BG).inner_margin(Margin::same(5)))
             .show(ui, |ui| {

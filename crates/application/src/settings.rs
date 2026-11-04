@@ -386,4 +386,25 @@ mod tests {
         settings.capture.fps = 0;
         assert!(settings.validate().is_err());
     }
+
+    /// Проверяет сохранение пользовательских путей и устройства.
+    #[test]
+    fn persists_custom_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SettingsStore::new(dir.path().join("settings.json"));
+        let settings = Settings {
+            models_dir: "/tmp/models".to_string(),
+            output_dir: "/tmp/output".to_string(),
+            transcription: TranscriptionSettings {
+                compute_device: "gpu".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        store.save(&settings).expect("save");
+        let loaded = store.load().expect("load");
+        assert_eq!(loaded.models_dir, "/tmp/models");
+        assert_eq!(loaded.output_dir, "/tmp/output");
+        assert_eq!(loaded.transcription.compute_device, "gpu");
+    }
 }

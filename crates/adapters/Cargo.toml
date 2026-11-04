@@ -11,6 +11,7 @@ screenrecorder-domain = { path = "../domain" }
 directories.workspace = true
 dirs.workspace = true
 thiserror.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
