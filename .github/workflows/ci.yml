@@ -24,7 +24,25 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev \
-            libgl1-mesa-dev
+            libgl1-mesa-dev clang libclang-dev cmake
+
+      - name: Install Windows native deps
+        if: runner.os == 'Windows'
+        run: choco install llvm cmake -y --no-progress
+        shell: pwsh
+
+      - name: Install macOS native deps
+        if: runner.os == 'macOS'
+        run: brew install llvm cmake
+
+      - name: Configure libclang
+        if: runner.os == 'Windows'
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+        shell: pwsh
+
+      - name: Configure libclang
+        if: runner.os == 'macOS'
+        run: echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
