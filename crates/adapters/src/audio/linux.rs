@@ -136,10 +136,10 @@ impl LinuxAudioRecorder {
         let mic_path = session_dir.join("mic.wav");
 
         let mut warnings = Vec::new();
-        self.system = spawn_pw_record(&system, &system_path, 2, "system")
+        self.system = spawn_pw_record(&system, &system_path, 2, "system", true)
             .inspect_err(|error| warnings.push(error.to_string()))
             .ok();
-        self.mic = spawn_pw_record(&mic, &mic_path, 1, "mic")
+        self.mic = spawn_pw_record(&mic, &mic_path, 1, "mic", false)
             .inspect_err(|error| warnings.push(error.to_string()))
             .ok();
 
@@ -175,7 +175,8 @@ impl LinuxAudioRecorder {
             "screenrecorder-probe-{}-{stamp}.wav",
             std::process::id()
         ));
-        let child = spawn_pw_record(&resolved, &path, 2, "probe")?;
+        let capture_sink = kind == AudioDeviceKind::System;
+        let child = spawn_pw_record(&resolved, &path, 2, "probe", capture_sink)?;
         thread::sleep(Duration::from_secs(1));
         stop_child(&mut Some(child), "probe")?;
         let result = read_probe(&path);
@@ -316,28 +317,43 @@ fn resolve_target(target: Option<&str>, kind: AudioDeviceKind) -> Result<String,
     }
 }
 
+/// Собирает команду `pw-record` для указанного узла.
+///
+/// Для системной дорожки включается `stream.capture.sink=true`:
+/// без этого свойства `pw-record` подключается к sink как к обычному
+/// источнику и пишет тишину вместо monitor-портов.
+fn pw_record_command(target: &str, output: &Path, channels: u32, capture_sink: bool) -> Command {
+    let mut command = Command::new("pw-record");
+    command.args([
+        "--target",
+        target,
+        "--rate",
+        "48000",
+        "--channels",
+        &channels.to_string(),
+        "--format",
+        "s16",
+    ]);
+    if capture_sink {
+        command.args(["-P", "stream.capture.sink=true"]);
+    }
+    command
+        .arg(output)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
 /// Запускает `pw-record` для указанного узла.
 fn spawn_pw_record(
     target: &str,
     output: &Path,
     channels: u32,
     track: &'static str,
+    capture_sink: bool,
 ) -> Result<Child, AudioError> {
-    Command::new("pw-record")
-        .args([
-            "--target",
-            target,
-            "--rate",
-            "48000",
-            "--channels",
-            &channels.to_string(),
-            "--format",
-            "s16",
-            &output.to_string_lossy(),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+    pw_record_command(target, output, channels, capture_sink)
         .spawn()
         .map_err(|source| AudioError::Spawn { track, source })
 }
@@ -563,6 +579,34 @@ pub fn analyze_track(path: &Path) -> Result<AudioTrackAnalysis, AudioError> {
 mod tests {
     use super::*;
 
+    /// Проверяет, что системная дорожка включает захват monitor-портов.
+    #[test]
+    fn system_capture_uses_sink_monitor() {
+        let system = pw_record_command(
+            "@DEFAULT_AUDIO_SINK@",
+            Path::new("/tmp/system.wav"),
+            2,
+            true,
+        );
+        let args: Vec<String> = system
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"stream.capture.sink=true".to_string()));
+
+        let mic = pw_record_command(
+            "@DEFAULT_AUDIO_SOURCE@",
+            Path::new("/tmp/mic.wav"),
+            1,
+            false,
+        );
+        let mic_args: Vec<String> = mic
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(!mic_args.contains(&"stream.capture.sink=true".to_string()));
+    }
+
     /// Проверяет остановку без запущенных процессов.
     #[test]
     fn stop_without_start_is_ok() {
@@ -607,6 +651,44 @@ mod tests {
         thread::sleep(Duration::from_secs(2));
         recorder.stop().expect("stop");
         assert!(dir.path().join("system.wav").exists() || dir.path().join("mic.wav").exists());
+    }
+
+    /// Проверяет реальную запись системного звука; запускать вручную
+    /// при воспроизведении любого звука в default sink.
+    #[test]
+    #[ignore = "требует PipeWire и воспроизводимый системный звук"]
+    fn records_system_audio() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut recorder = LinuxAudioRecorder::new();
+        let started = recorder
+            .start(
+                dir.path(),
+                Some("@DEFAULT_AUDIO_SINK@"),
+                Some("@DEFAULT_AUDIO_SOURCE@"),
+            )
+            .expect("start");
+        assert!(started.system, "системная дорожка не запустилась");
+        thread::sleep(Duration::from_secs(2));
+        recorder.stop().expect("stop");
+        let probe = read_levels(&dir.path().join("system.wav")).expect("system.wav");
+        assert!(
+            !probe.silent,
+            "system.wav тихий: RMS {:.1} dBFS",
+            probe.rms_dbfs
+        );
+    }
+
+    /// Проверяет реальный preflight системного звука; запускать вручную
+    /// при воспроизведении любого звука в default sink.
+    #[test]
+    #[ignore = "требует PipeWire и воспроизводимый системный звук"]
+    fn probes_system_audio() {
+        let probe = LinuxAudioRecorder::probe(None, AudioDeviceKind::System).expect("probe");
+        assert!(
+            !probe.silent,
+            "системный звук тихий: RMS {:.1} dBFS",
+            probe.rms_dbfs
+        );
     }
 
     /// Проверяет реальный preflight микрофона; запускать вручную.
