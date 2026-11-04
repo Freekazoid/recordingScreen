@@ -62,6 +62,8 @@ venv.bak/
 .python/
 tools/
 output/
+# Rust
+target/
 
 # ========== IDE ==========
 .vscode/

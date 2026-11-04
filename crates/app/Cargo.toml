@@ -1,0 +1,19 @@
+[package]
+name = "screenrecorder-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "screenrecorder"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+screenrecorder-adapters = { path = "../adapters" }
+screenrecorder-application = { path = "../application" }
+screenrecorder-ui = { path = "../ui" }
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

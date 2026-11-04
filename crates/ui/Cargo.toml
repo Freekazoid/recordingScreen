@@ -1,0 +1,12 @@
+[package]
+name = "screenrecorder-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+screenrecorder-adapters = { path = "../adapters" }
+screenrecorder-application = { path = "../application" }
+eframe.workspace = true
+serde_json.workspace = true
