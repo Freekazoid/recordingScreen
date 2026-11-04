@@ -12,7 +12,7 @@ use eframe::egui::{
 };
 use screenrecorder_adapters::{
     AudioDevice, AudioDeviceKind, AudioProbe, DownloadProgress, ExportRequest, LinuxAudioRecorder,
-    ModelManager, Paths, X11VideoRecorder, merge_recording,
+    ModelManager, Paths, WaylandPortalRecorder, X11VideoRecorder, merge_recording,
 };
 use screenrecorder_application::{Settings, SettingsStore};
 use screenrecorder_domain::SessionId;
@@ -63,6 +63,9 @@ pub struct ScreenRecorderApp {
     video_quality: String,
     audio_track_mode: String,
     recorder: X11VideoRecorder,
+    wayland_recorder: WaylandPortalRecorder,
+    using_wayland: bool,
+    wayland_pending: bool,
     audio_recorder: LinuxAudioRecorder,
     recording: bool,
     session_dir: Option<PathBuf>,
@@ -96,6 +99,9 @@ impl ScreenRecorderApp {
             video_quality: "Хорошее (CRF 23)".to_string(),
             audio_track_mode: "Как есть (без пережатия)".to_string(),
             recorder: X11VideoRecorder::new(),
+            wayland_recorder: WaylandPortalRecorder::new(),
+            using_wayland: false,
+            wayland_pending: false,
             audio_recorder: LinuxAudioRecorder::new(),
             recording: false,
             session_dir: None,
@@ -252,53 +258,75 @@ impl ScreenRecorderApp {
         }
     }
 
-    /// Запускает или останавливает запись X11-экрана.
+    /// Запускает аудиодорожки в каталоге сессии.
+    fn start_audio(&mut self, session_dir: &Path) {
+        let mic_device = self.settings.capture.mic_device.clone();
+        let system_device = self.settings.capture.system_device.clone();
+        match self.audio_recorder.start(
+            session_dir,
+            Some(system_device.as_str()),
+            Some(mic_device.as_str()),
+        ) {
+            Ok(audio) => {
+                if !audio.warnings.is_empty() {
+                    self.log = format!(
+                        "Видео пишется, но звук неполный: {}",
+                        audio.warnings.join("; ")
+                    );
+                } else if audio.system && audio.mic {
+                    self.log = format!(
+                        "Запись: видео + system.wav + mic.wav ({})",
+                        session_dir.display()
+                    );
+                } else {
+                    self.log = "Запись: доступна только часть аудиодорожек".to_string();
+                }
+            }
+            Err(error) => {
+                self.log = format!("Видео пишется без звука: {error}");
+            }
+        }
+    }
+
+    /// Запускает или останавливает запись экрана.
     fn toggle_recording(&mut self, mode: &str) {
         if self.recording {
             self.stop_recording();
             return;
         }
 
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            self.status = "Wayland: запись через портал — следующий этап".to_string();
-            self.log = "X11-захват недоступен в Wayland-сессии. Портал ScreenCast \
-                        будет добавлен на этапе 2."
-                .to_string();
-            return;
-        }
-
         let session_id = SessionId::new();
         let session_dir = self.paths.session_dir(session_id.as_str());
         let output = session_dir.join("screen.mkv");
+
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            match self
+                .wayland_recorder
+                .start(&output, self.settings.capture.fps)
+            {
+                Ok(()) => {
+                    self.using_wayland = true;
+                    self.wayland_pending = true;
+                    self.recording = true;
+                    self.audio_offset_ms = 0;
+                    self.session_dir = Some(session_dir);
+                    self.status = "Wayland: ожидание доступа к экрану…".to_string();
+                    self.log = "Подтвердите доступ к экрану в системном диалоге.".to_string();
+                }
+                Err(error) => {
+                    self.status = format!("Ошибка Wayland-записи: {error}");
+                    self.log = format!("Не удалось запустить портал: {error}");
+                }
+            }
+            return;
+        }
+
         match self.recorder.start(&output, self.settings.capture.fps) {
             Ok(()) => {
                 let video_started = Instant::now();
-                let mic_device = self.settings.capture.mic_device.clone();
-                let system_device = self.settings.capture.system_device.clone();
-                match self.audio_recorder.start(
-                    &session_dir,
-                    Some(system_device.as_str()),
-                    Some(mic_device.as_str()),
-                ) {
-                    Ok(audio) => {
-                        if !audio.warnings.is_empty() {
-                            self.log = format!(
-                                "Видео пишется, но звук неполный: {}",
-                                audio.warnings.join("; ")
-                            );
-                        } else if audio.system && audio.mic {
-                            self.log = format!(
-                                "Запись: видео + system.wav + mic.wav ({})",
-                                session_dir.display()
-                            );
-                        } else {
-                            self.log = "Запись: доступна только часть аудиодорожек".to_string();
-                        }
-                    }
-                    Err(error) => {
-                        self.log = format!("Видео пишется без звука: {error}");
-                    }
-                }
+                self.using_wayland = false;
+                self.wayland_pending = false;
+                self.start_audio(&session_dir);
                 self.audio_offset_ms = video_started.elapsed().as_millis() as i64;
                 self.recording = true;
                 self.session_dir = Some(session_dir);
@@ -317,8 +345,17 @@ impl ScreenRecorderApp {
             return;
         }
         self.recording = false;
-        let audio_result = self.audio_recorder.stop();
-        let video_result = self.recorder.stop();
+        self.wayland_pending = false;
+        let audio_result = self
+            .audio_recorder
+            .stop()
+            .map_err(|error| error.to_string());
+        let video_result: Result<(), String> = if self.using_wayland {
+            self.wayland_recorder.stop()
+        } else {
+            self.recorder.stop().map_err(|error| error.to_string())
+        };
+        self.using_wayland = false;
         let dir = self
             .session_dir
             .as_ref()
@@ -410,12 +447,41 @@ impl ScreenRecorderApp {
 
     /// Проверяет, не завершились ли процессы записи сами.
     fn poll_recording(&mut self) {
-        if self.recording && !self.recorder.is_running() && !self.audio_recorder.is_running() {
-            self.recording = false;
-            self.status = "Запись завершена".to_string();
-            self.log = "Запись завершилась. Проверьте файлы сессии.".to_string();
-            if let Some(session_dir) = self.session_dir.clone() {
-                self.start_export(&session_dir);
+        if self.wayland_pending {
+            if let Some(result) = self.wayland_recorder.take_start_result() {
+                self.wayland_pending = false;
+                match result {
+                    Ok(()) => {
+                        if let Some(session_dir) = self.session_dir.clone() {
+                            self.start_audio(&session_dir);
+                        }
+                        self.status = "Идёт запись: Wayland".to_string();
+                        self.log = "Портал ScreenCast запущен.".to_string();
+                    }
+                    Err(error) => {
+                        self.recording = false;
+                        self.using_wayland = false;
+                        self.status = format!("Ошибка Wayland: {error}");
+                        self.log = format!("Портал не запустил запись: {error}");
+                    }
+                }
+            }
+            return;
+        }
+
+        if self.recording {
+            let video_running = if self.using_wayland {
+                self.wayland_recorder.is_running()
+            } else {
+                self.recorder.is_running()
+            };
+            if !video_running && !self.audio_recorder.is_running() {
+                self.recording = false;
+                self.status = "Запись завершена".to_string();
+                self.log = "Запись завершилась. Проверьте файлы сессии.".to_string();
+                if let Some(session_dir) = self.session_dir.clone() {
+                    self.start_export(&session_dir);
+                }
             }
         }
     }

@@ -20,6 +20,7 @@ authors = ["Freekazoid"]
 
 [workspace.dependencies]
 anyhow = "1"
+ashpd = { version = "0.13", features = ["screencast"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6"
 dirs = "6"
@@ -34,6 +35,7 @@ tempfile = "3"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 ureq = "2.12"
 uuid = { version = "1", features = ["v4", "serde"] }
 

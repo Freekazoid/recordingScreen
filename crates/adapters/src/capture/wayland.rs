@@ -1,0 +1,268 @@
+//! Wayland-запись через xdg-desktop-portal ScreenCast и PipeWire.
+//!
+//! Портал показывает системный диалог выбора экрана/окна. После получения
+//! PipeWire FD запускается `gst-launch-1.0` с `pipewiresrc`; запись идёт
+//! в MKV. Остановка — SIGINT, чтобы GStreamer корректно закрыл файл.
+
+use ashpd::desktop::screencast::{
+    CursorMode, Screencast, SelectSourcesOptions, SourceType, Stream,
+};
+use ashpd::desktop::{PersistMode, Session};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+/// Рекордер Wayland-экрана через портал.
+#[derive(Debug, Default)]
+pub struct WaylandPortalRecorder {
+    start_rx: Option<Receiver<Result<(), String>>>,
+    stop_tx: Option<Sender<()>>,
+    worker: Option<JoinHandle<()>>,
+    active: Arc<AtomicBool>,
+}
+
+impl WaylandPortalRecorder {
+    /// Создаёт рекордер без запущенного портала.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Запускает портал в фоне; результат доступен через `take_start_result`.
+    pub fn start(&mut self, output: &Path, fps: u32) -> Result<(), String> {
+        if self.worker.is_some() {
+            return Err("Wayland-запись уже запущена".to_string());
+        }
+        let output = output.to_path_buf();
+        let (start_tx, start_rx) = mpsc::channel();
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let active = Arc::new(AtomicBool::new(false));
+        let worker_active = Arc::clone(&active);
+
+        let worker = thread::spawn(move || {
+            let runtime = match tokio::runtime::Runtime::new() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = start_tx.send(Err(format!("Tokio: {error}")));
+                    return;
+                }
+            };
+
+            let portal = runtime.block_on(open_portal());
+            let (proxy, session, fd, node_id) = match portal {
+                Ok(portal) => portal,
+                Err(error) => {
+                    let _ = start_tx.send(Err(error));
+                    return;
+                }
+            };
+
+            let raw_fd = fd.as_raw_fd();
+            // GStreamer должен унаследовать fd, поэтому снимаем CLOEXEC.
+            if unsafe { libc::fcntl(raw_fd, libc::F_SETFD, 0) } == -1 {
+                let _ = start_tx.send(Err("не удалось подготовить PipeWire fd".to_string()));
+                return;
+            }
+
+            let child = match spawn_gst(raw_fd, node_id, &output, fps) {
+                Ok(child) => child,
+                Err(error) => {
+                    let _ = start_tx.send(Err(error));
+                    return;
+                }
+            };
+            worker_active.store(true, Ordering::SeqCst);
+            let _ = start_tx.send(Ok(()));
+
+            let mut child = child;
+            loop {
+                if stop_rx.try_recv().is_ok() {
+                    break;
+                }
+                if let Ok(Some(_)) = child.try_wait() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            let _ = stop_process(&mut child);
+            worker_active.store(false, Ordering::SeqCst);
+            drop(fd);
+            drop(session);
+            drop(proxy);
+        });
+
+        self.start_rx = Some(start_rx);
+        self.stop_tx = Some(stop_tx);
+        self.worker = Some(worker);
+        self.active = active;
+        Ok(())
+    }
+
+    /// Возвращает результат запуска портала, если он уже готов.
+    pub fn take_start_result(&mut self) -> Option<Result<(), String>> {
+        let receiver = self.start_rx.as_ref()?;
+        match receiver.try_recv() {
+            Ok(result) => {
+                self.start_rx = None;
+                Some(result)
+            }
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.start_rx = None;
+                Some(Err("поток портала завершился".to_string()))
+            }
+        }
+    }
+
+    /// Проверяет, идёт ли запись.
+    pub fn is_running(&self) -> bool {
+        self.active.load(Ordering::SeqCst)
+    }
+
+    /// Останавливает запись и закрывает портальную сессию.
+    pub fn stop(&mut self) -> Result<(), String> {
+        if let Some(sender) = self.stop_tx.take() {
+            let _ = sender.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            worker
+                .join()
+                .map_err(|_| "поток Wayland-записи завершился с ошибкой".to_string())?;
+        }
+        self.start_rx = None;
+        self.active.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+impl Drop for WaylandPortalRecorder {
+    /// Гарантирует остановку портальной сессии.
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+/// Открывает портал и получает PipeWire FD + node id.
+async fn open_portal() -> Result<(Screencast, Session<Screencast>, OwnedFd, u32), String> {
+    let proxy = Screencast::new()
+        .await
+        .map_err(|error| format!("Screencast: {error}"))?;
+    let session = proxy
+        .create_session(Default::default())
+        .await
+        .map_err(|error| format!("CreateSession: {error}"))?;
+    proxy
+        .select_sources(
+            &session,
+            SelectSourcesOptions::default()
+                .set_cursor_mode(CursorMode::Embedded)
+                .set_sources(SourceType::Monitor | SourceType::Window)
+                .set_multiple(false)
+                .set_persist_mode(PersistMode::DoNot),
+        )
+        .await
+        .map_err(|error| format!("SelectSources: {error}"))?;
+    let response = proxy
+        .start(&session, None, Default::default())
+        .await
+        .map_err(|error| format!("Start: {error}"))?
+        .response()
+        .map_err(|error| format!("Start response: {error}"))?;
+    let stream: &Stream = response
+        .streams()
+        .first()
+        .ok_or_else(|| "портал не вернул поток".to_string())?;
+    let node_id = stream.pipe_wire_node_id();
+    let fd = proxy
+        .open_pipe_wire_remote(&session, Default::default())
+        .await
+        .map_err(|error| format!("OpenPipeWireRemote: {error}"))?;
+    Ok((proxy, session, fd, node_id))
+}
+
+/// Запускает GStreamer-пайплайн записи PipeWire в MKV.
+fn spawn_gst(fd: i32, node_id: u32, output: &Path, fps: u32) -> Result<Child, String> {
+    let args = build_gst_args(fd, node_id, output, fps);
+    Command::new("gst-launch-1.0")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("gst-launch-1.0: {error}"))
+}
+
+/// Собирает аргументы `gst-launch-1.0`.
+fn build_gst_args(fd: i32, node_id: u32, output: &Path, fps: u32) -> Vec<String> {
+    vec![
+        "-e".to_string(),
+        "pipewiresrc".to_string(),
+        format!("fd={fd}"),
+        format!("path={node_id}"),
+        "always-copy=true".to_string(),
+        "do-timestamp=true".to_string(),
+        "!".to_string(),
+        "queue".to_string(),
+        "!".to_string(),
+        "videoconvert".to_string(),
+        "!".to_string(),
+        "video/x-raw,format=I420".to_string(),
+        format!("framerate={fps}/1"),
+        "!".to_string(),
+        "x264enc".to_string(),
+        "tune=zerolatency".to_string(),
+        "speed-preset=veryfast".to_string(),
+        "bitrate=8000".to_string(),
+        "!".to_string(),
+        "h264parse".to_string(),
+        "!".to_string(),
+        "matroskamux".to_string(),
+        "!".to_string(),
+        "filesink".to_string(),
+        format!("location={}", output.display()),
+    ]
+}
+
+/// Останавливает GStreamer через SIGINT и ждёт завершения.
+fn stop_process(child: &mut Child) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        unsafe {
+            libc::kill(child.id() as i32, libc::SIGINT);
+        }
+        for _ in 0..50 {
+            match child.try_wait() {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => thread::sleep(Duration::from_millis(100)),
+                Err(error) => return Err(format!("ожидание gst: {error}")),
+            }
+        }
+        child.kill().map_err(|error| format!("kill gst: {error}"))?;
+    }
+    #[cfg(not(unix))]
+    {
+        child.kill().map_err(|error| format!("kill gst: {error}"))?;
+    }
+    child.wait().map_err(|error| format!("wait gst: {error}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Проверяет, что pipeline содержит нужные элементы.
+    #[test]
+    fn builds_gst_pipeline() {
+        let args = build_gst_args(7, 42, Path::new("/tmp/out.mkv"), 20);
+        assert!(args.contains(&"pipewiresrc".to_string()));
+        assert!(args.contains(&"fd=7".to_string()));
+        assert!(args.contains(&"path=42".to_string()));
+        assert!(args.contains(&"filesink".to_string()));
+        assert!(args.contains(&"location=/tmp/out.mkv".to_string()));
+    }
+}

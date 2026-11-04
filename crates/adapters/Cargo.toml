@@ -8,11 +8,13 @@ license.workspace = true
 [dependencies]
 screenrecorder-application = { path = "../application" }
 screenrecorder-domain = { path = "../domain" }
+ashpd.workspace = true
 directories.workspace = true
 dirs.workspace = true
 hound.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
