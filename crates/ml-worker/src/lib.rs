@@ -1,11 +1,12 @@
 //! JSON-RPC-сервер ML-воркера.
 //!
-//! Пока это каркас: ASR и диаризация отвечают понятной ошибкой
-//! «модель не подключена», а `hello` и `models.status` уже готовы для
-//! интеграции с Rust-ядром.
+//! ASR работает через whisper-rs; диаризация пока отвечает понятной
+//! ошибкой «модель не подключена».
 
+use screenrecorder_ml::WhisperEngine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::path::PathBuf;
 
 /// Версия протокола Rust core ↔ ML worker.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -16,6 +17,18 @@ struct RpcRequest {
     jsonrpc: String,
     id: Option<Value>,
     method: String,
+    #[serde(default)]
+    params: Option<Value>,
+}
+
+/// Параметры `asr.transcribe`.
+#[derive(Debug, Deserialize)]
+struct AsrParams {
+    audio_path: PathBuf,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    timestamps: Option<bool>,
 }
 
 /// Исходящий JSON-RPC-ответ.
@@ -67,17 +80,85 @@ impl RpcResponse {
 /// Состояние ML-воркера.
 pub struct Server {
     running: bool,
+    models_dir: PathBuf,
+    asr: Option<WhisperEngine>,
 }
 
 impl Server {
     /// Создаёт сервер в рабочем состоянии.
     pub fn new() -> Self {
-        Self { running: true }
+        let models_dir = std::env::var_os("SCREENRECORDER_MODELS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("models"));
+        Self::with_models_dir(models_dir)
+    }
+
+    /// Создаёт сервер с явным каталогом моделей.
+    pub fn with_models_dir(models_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            running: true,
+            models_dir: models_dir.into(),
+            asr: None,
+        }
     }
 
     /// Возвращает `true`, пока воркер должен обрабатывать запросы.
     pub fn is_running(&self) -> bool {
         self.running
+    }
+
+    /// Путь к модели Whisper.
+    fn whisper_path(&self) -> PathBuf {
+        self.models_dir
+            .join("whisper")
+            .join("ggml-large-v3-turbo-q5_0.bin")
+    }
+
+    /// Проверяет готовность моделей.
+    fn model_status(&self) -> Value {
+        json!({
+            "whisper": self.whisper_path().is_file(),
+            "diarization": self.models_dir.join("diarization/segmentation.onnx").is_file()
+                && self.models_dir.join("diarization/embedding.onnx").is_file(),
+            "vad": self.models_dir.join("vad/silero_vad.onnx").is_file(),
+        })
+    }
+
+    /// Выполняет `asr.transcribe`.
+    fn transcribe(&mut self, id: Value, params: Option<Value>) -> RpcResponse {
+        let params: AsrParams = match serde_json::from_value(params.unwrap_or_default()) {
+            Ok(params) => params,
+            Err(error) => {
+                return RpcResponse::err(id, -32602, format!("параметры ASR: {error}"));
+            }
+        };
+        if !params.audio_path.is_file() {
+            return RpcResponse::err(
+                id,
+                -32002,
+                format!("аудиофайл не найден: {}", params.audio_path.display()),
+            );
+        }
+        let model = self.whisper_path();
+        if !model.is_file() {
+            return RpcResponse::err(
+                id,
+                -32001,
+                format!("модель ASR не найдена: {}", model.display()),
+            );
+        }
+        let engine = self.asr.get_or_insert_with(|| WhisperEngine::new(&model));
+        match engine.transcribe(
+            &params.audio_path,
+            params.language.as_deref(),
+            params.timestamps.unwrap_or(true),
+        ) {
+            Ok(transcript) => match serde_json::to_value(transcript) {
+                Ok(value) => RpcResponse::ok(id, value),
+                Err(error) => RpcResponse::err(id, -32603, format!("сериализация: {error}")),
+            },
+            Err(error) => RpcResponse::err(id, -32002, error.to_string()),
+        }
     }
 
     /// Обрабатывает одну строку JSON и возвращает строку ответа.
@@ -101,7 +182,10 @@ impl Server {
         }
 
         let id = request.id.unwrap_or(Value::Null);
-        let response = match request.method.as_str() {
+        let params = request.params;
+        let method = request.method;
+        let status = self.model_status();
+        let response = match method.as_str() {
             "hello" => RpcResponse::ok(
                 id,
                 json!({
@@ -112,23 +196,11 @@ impl Server {
                         "asr": "whisper-rs",
                         "diarization": "sherpa-onnx"
                     },
-                    "models": {
-                        "whisper": false,
-                        "diarization": false
-                    }
+                    "models": status
                 }),
             ),
-            "models.status" => RpcResponse::ok(
-                id,
-                json!({
-                    "whisper": false,
-                    "diarization": false,
-                    "vad": false
-                }),
-            ),
-            "asr.transcribe" => {
-                RpcResponse::err(id, -32001, "модель ASR ещё не подключена (этап 4)")
-            }
+            "models.status" => RpcResponse::ok(id, status),
+            "asr.transcribe" => self.transcribe(id, params),
             "diarize.run" => {
                 RpcResponse::err(id, -32001, "модель диаризации ещё не подключена (этап 4)")
             }
@@ -189,13 +261,20 @@ mod tests {
         assert_eq!(value["error"]["code"], -32601);
     }
 
-    /// Проверяет понятную ошибку до подключения модели.
+    /// Проверяет понятную ошибку при отсутствии модели.
     #[test]
     fn transcribe_reports_missing_model() {
-        let mut server = Server::new();
-        let response = server
-            .handle_line(r#"{"jsonrpc":"2.0","id":3,"method":"asr.transcribe","params":{}}"#)
-            .expect("ответ");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audio = dir.path().join("audio.wav");
+        std::fs::write(&audio, b"RIFF").expect("audio");
+        let mut server = Server::with_models_dir(dir.path());
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "asr.transcribe",
+            "params": {"audio_path": audio}
+        });
+        let response = server.handle_line(&request.to_string()).expect("ответ");
         let value: Value = serde_json::from_str(&response).expect("json");
         assert_eq!(value["error"]["code"], -32001);
     }

@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
 
+pub mod audio;
+pub mod whisper;
+
+pub use whisper::WhisperEngine;
+
 /// Ошибки ML-слоя.
 #[derive(Debug, Error)]
 pub enum MlError {

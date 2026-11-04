@@ -40,6 +40,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 ureq = "2.12"
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+whisper-rs = "0.16"
 
 [profile.release]
 lto = "thin"
