@@ -21,7 +21,7 @@ authors = ["Freekazoid"]
 
 [workspace.dependencies]
 anyhow = "1"
-ashpd = { version = "0.13", features = ["screencast", "screenshot"] }
+ashpd = { version = "0.13", default-features = false, features = ["screencast", "screenshot", "async-io"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6"
 dirs = "6"
