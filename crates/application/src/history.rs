@@ -306,6 +306,36 @@ impl HistoryStore {
         Ok(records)
     }
 
+    /// Возвращает задачи в очереди.
+    pub fn queued_jobs(&self, limit: usize) -> Result<Vec<JobRecord>, HistoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, session_id, kind, state, attempts, last_error, created_at, updated_at
+                 FROM jobs WHERE state = 'queued' ORDER BY created_at LIMIT ?1",
+            )
+            .map_err(|source| self.sqlite(source))?;
+        let rows = statement
+            .query_map([limit as i64], |row| {
+                Ok(JobRecord {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    state: row.get(3)?,
+                    attempts: row.get(4)?,
+                    last_error: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })
+            .map_err(|source| self.sqlite(source))?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row.map_err(|source| self.sqlite(source))?);
+        }
+        Ok(records)
+    }
+
     /// Возвращает выполнявшиеся задачи в очередь после перезапуска.
     pub fn recover_jobs(&self) -> Result<usize, HistoryError> {
         let connection = self.connection()?;
