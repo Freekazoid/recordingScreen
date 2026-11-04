@@ -14,7 +14,7 @@ use screenrecorder_adapters::{
     AudioDevice, AudioDeviceKind, AudioProbe, DownloadProgress, ExportRequest, LinuxAudioRecorder,
     ModelManager, PORTAL_CANCELLED, Paths, PortalSource, Region, WaylandPortalRecorder, WindowInfo,
     X11VideoRecorder, analyze_track, list_windows, merge_audio, merge_recording, read_levels,
-    take_screenshot,
+    recover_all_segments, take_screenshot,
 };
 use screenrecorder_application::{
     DiarizeWorker, HistoryStore, ManifestState, MlWorker, Rect, SessionManifest, SessionRecord,
@@ -141,6 +141,7 @@ impl ScreenRecorderApp {
         let audio_devices = LinuxAudioRecorder::list_devices().unwrap_or_default();
         let recordings = paths.data_dir.join("recordings");
         let recovered = recover_incomplete(&recordings).unwrap_or_default();
+        let (recovered_segments, segment_errors) = recover_all_segments(&recordings);
         let history = HistoryStore::new(paths.data_dir.join("history.sqlite3"));
         let mut log = if recovered.is_empty() {
             "Готово. Проверьте систему и настройки.".to_string()
@@ -151,6 +152,12 @@ impl ScreenRecorderApp {
                 recordings.display()
             )
         };
+        if recovered_segments > 0 {
+            log = format!("{log} Склеено сегментов видео: {recovered_segments}.");
+        }
+        if !segment_errors.is_empty() {
+            log = format!("{log} Ошибки склейки: {}", segment_errors.join("; "));
+        }
         if let Err(error) = history.init() {
             log = format!("История недоступна: {error}");
         } else if let Ok(imported) = import_manifests(&history, &recordings)

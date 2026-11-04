@@ -5,6 +5,7 @@
 //! Wayland-портал и аудиодорожки за тем же интерфейсом.
 
 use super::Region;
+use super::segments::concat_segments;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use thiserror::Error;
@@ -33,6 +34,7 @@ pub enum CaptureError {
 #[derive(Debug, Default)]
 pub struct X11VideoRecorder {
     child: Option<Child>,
+    output: Option<PathBuf>,
 }
 
 impl X11VideoRecorder {
@@ -73,37 +75,50 @@ impl X11VideoRecorder {
             .stderr(Stdio::null());
         let child = command.spawn()?;
         self.child = Some(child);
+        self.output = Some(output.to_path_buf());
         Ok(())
     }
 
-    /// Останавливает запись и дожидается завершения ffmpeg.
+    /// Останавливает запись, склеивает сегменты и дожидается ffmpeg.
     pub fn stop(&mut self) -> Result<(), CaptureError> {
         let Some(mut child) = self.child.take() else {
             return Ok(());
         };
+        let output = self.output.take();
 
         #[cfg(unix)]
         {
+            let mut stopped = false;
             // SIGINT заставляет ffmpeg корректно закрыть контейнер.
             unsafe {
                 libc::kill(child.id() as i32, libc::SIGINT);
             }
             for _ in 0..50 {
                 match child.try_wait() {
-                    Ok(Some(_)) => return Ok(()),
+                    Ok(Some(_)) => {
+                        stopped = true;
+                        break;
+                    }
                     Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
                     Err(error) => return Err(CaptureError::Stop(error)),
                 }
             }
-            child.kill().map_err(CaptureError::Stop)?;
+            if !stopped {
+                child.kill().map_err(CaptureError::Stop)?;
+                child.wait().map_err(CaptureError::Stop)?;
+            }
         }
 
         #[cfg(not(unix))]
         {
             child.kill().map_err(CaptureError::Stop)?;
+            child.wait().map_err(CaptureError::Stop)?;
         }
 
-        child.wait().map_err(CaptureError::Stop)?;
+        if let Some(output) = output {
+            concat_segments(&output)
+                .map_err(|error| CaptureError::Stop(std::io::Error::other(error)))?;
+        }
         Ok(())
     }
 
@@ -166,9 +181,21 @@ fn build_args(
         "veryfast".to_string(),
         "-crf".to_string(),
         "23".to_string(),
+        "-g".to_string(),
+        "40".to_string(),
         "-pix_fmt".to_string(),
         "yuv420p".to_string(),
-        output.to_string_lossy().to_string(),
+        "-f".to_string(),
+        "segment".to_string(),
+        "-segment_time".to_string(),
+        "60".to_string(),
+        "-reset_timestamps".to_string(),
+        "1".to_string(),
+        "-segment_format".to_string(),
+        "matroska".to_string(),
+        super::segments::segment_pattern(output)
+            .to_string_lossy()
+            .to_string(),
     ]
 }
 
@@ -332,13 +359,14 @@ fn display_size() -> (u32, u32) {
 mod tests {
     use super::*;
 
-    /// Проверяет, что команда содержит x11grab и корректный путь.
+    /// Проверяет, что команда содержит x11grab и шаблон сегментов.
     #[test]
     fn builds_x11_command() {
         let args = build_args(":0.0", (1920, 1080), 20, Path::new("/tmp/screen.mkv"), None);
         assert!(args.contains(&"x11grab".to_string()));
         assert!(args.contains(&"1920x1080".to_string()));
-        assert!(args.contains(&"/tmp/screen.mkv".to_string()));
+        assert!(args.contains(&"/tmp/screen-%03d.mkv".to_string()));
+        assert!(args.contains(&"segment".to_string()));
         assert!(args.contains(&"20".to_string()));
     }
 

@@ -4,12 +4,14 @@
 //! добавляются следующими шагами, не меняя интерфейс `VideoRecorder`.
 
 pub mod screenshot;
+pub mod segments;
 pub mod wayland;
 pub mod x11;
 
 mod portal_token;
 
 pub use screenshot::take_screenshot;
+pub use segments::{concat_segments, recover_all_segments, segment_pattern};
 pub use wayland::{PORTAL_CANCELLED, PortalSource, WaylandPortalRecorder};
 pub use x11::{CaptureError, WindowInfo, X11VideoRecorder, list_windows};
 

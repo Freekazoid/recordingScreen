@@ -13,7 +13,8 @@ pub use audio::{
 };
 pub use capture::{
     CaptureError, PORTAL_CANCELLED, PortalSource, Region, WaylandPortalRecorder, WindowInfo,
-    X11VideoRecorder, list_windows, take_screenshot,
+    X11VideoRecorder, concat_segments, list_windows, recover_all_segments, segment_pattern,
+    take_screenshot,
 };
 pub use media::{ExportRequest, MediaError, merge_audio, merge_recording};
 pub use models::{DownloadProgress, MODELS, ModelError, ModelManager, ModelSpec};

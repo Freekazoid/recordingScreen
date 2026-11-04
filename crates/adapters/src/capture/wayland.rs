@@ -6,6 +6,7 @@
 
 use super::Region;
 use super::portal_token;
+use super::segments::concat_segments;
 use crate::portal;
 use ashpd::desktop::screencast::{
     CursorMode, Screencast, SelectSourcesOptions, SourceType, Stream,
@@ -149,6 +150,11 @@ impl WaylandPortalRecorder {
                 thread::sleep(Duration::from_millis(100));
             }
             let _ = stop_process(&mut child);
+            if let Err(error) = concat_segments(&output)
+                && let Ok(mut slot) = worker_error.lock()
+            {
+                *slot = Some(format!("склейка сегментов: {error}"));
+            }
             worker_active.store(false, Ordering::SeqCst);
             close_portal_session(runtime, &session);
             drop(fd);
@@ -468,13 +474,17 @@ fn build_gst_args(
         "tune=zerolatency".to_string(),
         "speed-preset=veryfast".to_string(),
         "bitrate=8000".to_string(),
+        "key-int-max=40".to_string(),
         "!".to_string(),
         "h264parse".to_string(),
         "!".to_string(),
-        "matroskamux".to_string(),
-        "!".to_string(),
-        "filesink".to_string(),
-        format!("location={}", output.display()),
+        "splitmuxsink".to_string(),
+        format!(
+            "location={}",
+            super::segments::segment_pattern(output).display()
+        ),
+        "max-size-time=60000000000".to_string(),
+        "muxer=matroskamux".to_string(),
     ]);
     args
 }
@@ -516,8 +526,8 @@ mod tests {
         assert!(args.contains(&"path=42".to_string()));
         assert!(args.contains(&"videorate".to_string()));
         assert!(args.contains(&"video/x-raw,format=I420,framerate=20/1".to_string()));
-        assert!(args.contains(&"filesink".to_string()));
-        assert!(args.contains(&"location=/tmp/out.mkv".to_string()));
+        assert!(args.contains(&"splitmuxsink".to_string()));
+        assert!(args.contains(&"location=/tmp/out-%03d.mkv".to_string()));
     }
 
     /// Проверяет обрезку области через videocrop.
