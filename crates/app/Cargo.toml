@@ -15,6 +15,7 @@ eframe.workspace = true
 image.workspace = true
 screenrecorder-adapters = { path = "../adapters" }
 screenrecorder-application = { path = "../application" }
+screenrecorder-ml-worker = { path = "../ml-worker" }
 screenrecorder-ui = { path = "../ui" }
 serde_json.workspace = true
 tracing.workspace = true

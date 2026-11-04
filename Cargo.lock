@@ -3358,6 +3358,7 @@ dependencies = [
  "image",
  "screenrecorder-adapters",
  "screenrecorder-application",
+ "screenrecorder-ml-worker",
  "screenrecorder-ui",
  "serde_json",
  "tracing",

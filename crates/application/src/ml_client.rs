@@ -31,10 +31,14 @@ pub struct MlWorker {
 }
 
 impl MlWorker {
-    /// Запускает `screenrecorder-ml` и подключается к его stdin/stdout.
+    /// Запускает ML-воркер и подключается к его stdin/stdout.
     pub fn spawn(models_dir: &Path) -> Result<Self, String> {
-        let binary = find_worker_binary()?;
-        let mut child = Command::new(&binary)
+        let (binary, embedded) = find_worker_binary()?;
+        let mut command = Command::new(&binary);
+        if embedded {
+            command.arg("--ml-worker");
+        }
+        let mut child = command
             .env("SCREENRECORDER_MODELS_DIR", models_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -132,11 +136,14 @@ impl Drop for MlWorker {
 }
 
 /// Ищет бинарник ML-воркера рядом с приложением.
-fn find_worker_binary() -> Result<PathBuf, String> {
+///
+/// Возвращает путь и признак `--ml-worker`: если отдельного бинарника нет,
+/// используется сам исполняемый файл приложения с этим режимом.
+fn find_worker_binary() -> Result<(PathBuf, bool), String> {
     if let Some(path) = std::env::var_os("SCREENRECORDER_ML_BIN") {
         let path = PathBuf::from(path);
         if path.is_file() {
-            return Ok(path);
+            return Ok((path, false));
         }
         return Err(format!(
             "SCREENRECORDER_ML_BIN указывает на несуществующий файл: {}",
@@ -150,10 +157,10 @@ fn find_worker_binary() -> Result<PathBuf, String> {
     for name in ["screenrecorder-ml", "screenrecorder-ml.exe"] {
         let candidate = dir.join(name);
         if candidate.is_file() {
-            return Ok(candidate);
+            return Ok((candidate, false));
         }
     }
-    Err("ML-воркер не найден рядом с приложением; соберите screenrecorder-ml".to_string())
+    Ok((exe, true))
 }
 
 #[cfg(test)]
@@ -170,7 +177,7 @@ mod tests {
             std::env::set_var("SCREENRECORDER_ML_BIN", &path);
         }
         let found = find_worker_binary().expect("binary");
-        assert_eq!(found, path);
+        assert_eq!(found, (path.clone(), false));
         unsafe {
             std::env::remove_var("SCREENRECORDER_ML_BIN");
         }

@@ -234,6 +234,30 @@ impl Default for Server {
     }
 }
 
+/// Читает JSON-RPC-запросы из stdin и пишет ответы в stdout.
+pub fn run_stdio() -> anyhow::Result<()> {
+    use anyhow::Context;
+    use std::io::{self, BufRead, Write};
+
+    let stdin = io::stdin();
+    let mut stdout = io::BufWriter::new(io::stdout());
+    let mut server = Server::new();
+    for line in stdin.lock().lines() {
+        let line = line.context("не удалось прочитать строку stdin")?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(response) = server.handle_line(&line) {
+            writeln!(stdout, "{response}").context("не удалось записать ответ")?;
+            stdout.flush().context("не удалось сбросить stdout")?;
+        }
+        if !server.is_running() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

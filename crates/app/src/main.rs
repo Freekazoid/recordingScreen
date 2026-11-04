@@ -68,6 +68,9 @@ fn main() -> anyhow::Result<()> {
     if args.iter().any(|arg| arg == "--diagnose") {
         return print_diagnostics();
     }
+    if args.iter().any(|arg| arg == "--ml-worker") {
+        return screenrecorder_ml_worker::run_stdio();
+    }
     if let Some(index) = args.iter().position(|arg| arg == "--select-area") {
         let image = args
             .get(index + 1)
