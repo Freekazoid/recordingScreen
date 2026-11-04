@@ -5,17 +5,18 @@
 //! и журнал внизу. UI вызывает только прикладные сервисы и не работает с
 //! файлами/процессами напрямую.
 
+use chrono::Local;
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke,
     TextStyle, Vec2,
 };
 use screenrecorder_adapters::{
-    AudioDevice, AudioDeviceKind, AudioProbe, DownloadProgress, LinuxAudioRecorder, ModelManager,
-    Paths, X11VideoRecorder,
+    AudioDevice, AudioDeviceKind, AudioProbe, DownloadProgress, ExportRequest, LinuxAudioRecorder,
+    ModelManager, Paths, X11VideoRecorder, merge_recording,
 };
 use screenrecorder_application::{Settings, SettingsStore};
 use screenrecorder_domain::SessionId;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 /// События фоновой загрузки модели.
@@ -74,6 +75,8 @@ pub struct ScreenRecorderApp {
     audio_devices: Vec<AudioDevice>,
     probe_rx: Option<Receiver<Result<AudioProbe, String>>>,
     probe_note: String,
+    export_rx: Option<Receiver<Result<PathBuf, String>>>,
+    exporting: bool,
 }
 
 impl ScreenRecorderApp {
@@ -104,6 +107,8 @@ impl ScreenRecorderApp {
             audio_devices,
             probe_rx: None,
             probe_note: String::new(),
+            export_rx: None,
+            exporting: false,
         }
     }
 
@@ -324,6 +329,77 @@ impl ScreenRecorderApp {
                 self.log = format!("Остановка: видео={video:?}, звук={audio:?}");
             }
         }
+        if let Some(session_dir) = self.session_dir.clone() {
+            self.start_export(&session_dir);
+        }
+    }
+
+    /// Запускает экспорт записи в выбранный формат в фоне.
+    fn start_export(&mut self, session_dir: &Path) {
+        if self.exporting {
+            return;
+        }
+        let video = session_dir.join("screen.mkv");
+        if !video.exists() {
+            self.log = "Экспорт пропущен: нет видеофайла.".to_string();
+            return;
+        }
+        let system = session_dir.join("system.wav");
+        let mic = session_dir.join("mic.wav");
+        let output_dir = if self.settings.output_dir.trim().is_empty() {
+            self.paths.default_output_dir.clone()
+        } else {
+            PathBuf::from(&self.settings.output_dir)
+        };
+        if let Err(error) = self.paths.ensure_writable(&output_dir) {
+            self.status = format!("Ошибка папки результатов: {error}");
+            return;
+        }
+        let format = self.output_format.to_lowercase();
+        let stamp = Local::now().format("%Y-%m-%d_%H-%M-%S");
+        let output = output_dir.join(format!("{stamp}.{format}"));
+        let request = ExportRequest {
+            video,
+            system_audio: system.exists().then_some(system),
+            mic_audio: mic.exists().then_some(mic),
+            output: output.clone(),
+            format,
+            crf: crf_from_label(&self.video_quality),
+            audio_mode: audio_mode_from_label(&self.audio_track_mode),
+        };
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = merge_recording(&request).map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+        self.export_rx = Some(receiver);
+        self.exporting = true;
+        self.status = "Экспорт записи...".to_string();
+        self.log = format!("Экспорт: {}", output.display());
+    }
+
+    /// Забирает результат фонового экспорта.
+    fn poll_export(&mut self) {
+        let result = match &self.export_rx {
+            Some(receiver) => match receiver.try_recv() {
+                Ok(result) => result,
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => Err("поток экспорта завершился".to_string()),
+            },
+            None => return,
+        };
+        self.export_rx = None;
+        self.exporting = false;
+        match result {
+            Ok(path) => {
+                self.status = "Экспорт завершён".to_string();
+                self.log = format!("Готово: {}", path.display());
+            }
+            Err(error) => {
+                self.status = format!("Ошибка экспорта: {error}");
+                self.log = format!("Не удалось экспортировать запись: {error}");
+            }
+        }
     }
 
     /// Проверяет, не завершились ли процессы записи сами.
@@ -332,6 +408,9 @@ impl ScreenRecorderApp {
             self.recording = false;
             self.status = "Запись завершена".to_string();
             self.log = "Запись завершилась. Проверьте файлы сессии.".to_string();
+            if let Some(session_dir) = self.session_dir.clone() {
+                self.start_export(&session_dir);
+            }
         }
     }
 
@@ -914,6 +993,7 @@ impl eframe::App for ScreenRecorderApp {
         self.poll_download();
         self.poll_folder_picker();
         self.poll_probe();
+        self.poll_export();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BG).inner_margin(Margin::same(5)))
             .show(ui, |ui| {
@@ -927,6 +1007,26 @@ impl eframe::App for ScreenRecorderApp {
             });
         self.persist_settings();
     }
+}
+
+/// Возвращает CRF по подписи из интерфейса.
+fn crf_from_label(label: &str) -> u32 {
+    match label {
+        "Отличное (CRF 18)" => 18,
+        "Среднее (CRF 28)" => 28,
+        "Сильное сжатие (CRF 35)" => 35,
+        _ => 23,
+    }
+}
+
+/// Возвращает режим аудио для ffmpeg по подписи из интерфейса.
+fn audio_mode_from_label(label: &str) -> String {
+    match label {
+        "Без звука" => "none",
+        "Сжать (AAC 128k)" => "aac",
+        _ => "copy",
+    }
+    .to_string()
 }
 
 /// Настраивает тёмную палитру под текущий дизайн приложения.

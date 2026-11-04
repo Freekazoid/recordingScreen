@@ -9,6 +9,7 @@ license.workspace = true
 screenrecorder-adapters = { path = "../adapters" }
 screenrecorder-application = { path = "../application" }
 screenrecorder-domain = { path = "../domain" }
+chrono.workspace = true
 eframe.workspace = true
 egui_extras = { version = "0.37", features = ["image"] }
 rfd.workspace = true
