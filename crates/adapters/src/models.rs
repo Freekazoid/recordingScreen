@@ -70,11 +70,11 @@ pub const MODELS: &[ModelSpec] = &[
     },
     ModelSpec {
         id: "vad",
-        title: "Silero VAD",
+        title: "Silero VAD (GGML)",
         files: &[ModelFile {
-            url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
-            file_name: "silero_vad.onnx",
-            size: 643_854,
+            url: "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin",
+            file_name: "ggml-silero-v5.1.2.bin",
+            size: 885_098,
         }],
     },
 ];

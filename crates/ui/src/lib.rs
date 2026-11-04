@@ -37,6 +37,8 @@ enum DownloadEvent {
 struct TranscriptOutput {
     text_path: PathBuf,
     json_path: PathBuf,
+    srt_path: PathBuf,
+    vtt_path: PathBuf,
     segments: usize,
     language: String,
     warning: Option<String>,
@@ -1174,15 +1176,23 @@ impl ScreenRecorderApp {
                 }
                 let text_path = dir.join("transcript.txt");
                 let json_path = dir.join("transcript.json");
+                let srt_path = dir.join("transcript.srt");
+                let vtt_path = dir.join("transcript.vtt");
                 std::fs::write(&text_path, format_transcript(&transcript))
                     .map_err(|error| format!("запись {}: {error}", text_path.display()))?;
                 let json = serde_json::to_string_pretty(&transcript)
                     .map_err(|error| format!("JSON транскрипта: {error}"))?;
                 std::fs::write(&json_path, json)
                     .map_err(|error| format!("запись {}: {error}", json_path.display()))?;
+                std::fs::write(&srt_path, format_srt(&transcript))
+                    .map_err(|error| format!("запись {}: {error}", srt_path.display()))?;
+                std::fs::write(&vtt_path, format_vtt(&transcript))
+                    .map_err(|error| format!("запись {}: {error}", vtt_path.display()))?;
                 Ok(TranscriptOutput {
                     text_path,
                     json_path,
+                    srt_path,
+                    vtt_path,
                     segments: transcript.segments.len(),
                     language: transcript.language,
                     warning,
@@ -1216,9 +1226,11 @@ impl ScreenRecorderApp {
             Ok(output) => {
                 self.status = "Транскрипция готова".to_string();
                 self.log = format!(
-                    "Текст: {} · JSON: {} ({} сегментов, язык {}){}",
+                    "Текст: {} · JSON: {} · SRT: {} · VTT: {} ({} сегментов, язык {}){}",
                     output.text_path.display(),
                     output.json_path.display(),
+                    output.srt_path.display(),
+                    output.vtt_path.display(),
                     output.segments,
                     output.language,
                     output
@@ -2214,6 +2226,62 @@ fn state_label(state: &str) -> &'static str {
     }
 }
 
+/// Форматирует транскрипт в SRT.
+fn format_srt(transcript: &Transcript) -> String {
+    let mut output = String::new();
+    for (index, segment) in transcript.segments.iter().enumerate() {
+        let text = match &segment.speaker {
+            Some(speaker) => format!("{speaker}: {}", segment.text.trim()),
+            None => segment.text.trim().to_string(),
+        };
+        output.push_str(&format!(
+            "{}\n{} --> {}\n{}\n\n",
+            index + 1,
+            format_srt_time(segment.start_ms),
+            format_srt_time(segment.end_ms),
+            text
+        ));
+    }
+    output
+}
+
+/// Форматирует транскрипт в WebVTT.
+fn format_vtt(transcript: &Transcript) -> String {
+    let mut output = String::from("WEBVTT\n\n");
+    for (index, segment) in transcript.segments.iter().enumerate() {
+        let text = match &segment.speaker {
+            Some(speaker) => format!("{speaker}: {}", segment.text.trim()),
+            None => segment.text.trim().to_string(),
+        };
+        output.push_str(&format!(
+            "{}\n{} --> {}\n{}\n\n",
+            index + 1,
+            format_vtt_time(segment.start_ms),
+            format_vtt_time(segment.end_ms),
+            text
+        ));
+    }
+    output
+}
+
+/// Форматирует время SRT: `ЧЧ:ММ:СС,ммм`.
+fn format_srt_time(ms: u64) -> String {
+    let hours = ms / 3_600_000;
+    let minutes = (ms / 60_000) % 60;
+    let seconds = (ms / 1_000) % 60;
+    let millis = ms % 1_000;
+    format!("{hours:02}:{minutes:02}:{seconds:02},{millis:03}")
+}
+
+/// Форматирует время WebVTT: `ЧЧ:ММ:СС.ммм`.
+fn format_vtt_time(ms: u64) -> String {
+    let hours = ms / 3_600_000;
+    let minutes = (ms / 60_000) % 60;
+    let seconds = (ms / 1_000) % 60;
+    let millis = ms % 1_000;
+    format!("{hours:02}:{minutes:02}:{seconds:02}.{millis:03}")
+}
+
 /// Форматирует транскрипт в текстовый файл с таймкодами.
 fn format_transcript(transcript: &Transcript) -> String {
     let mut output = String::new();
@@ -2346,4 +2414,47 @@ pub fn run(paths: Paths, settings: Settings) -> eframe::Result {
             Ok(Box::new(ScreenRecorderApp::new(paths, settings)))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use screenrecorder_application::TranscriptSegment;
+
+    /// Возвращает тестовый транскрипт.
+    fn sample() -> Transcript {
+        Transcript {
+            language: "ru".to_string(),
+            segments: vec![TranscriptSegment {
+                start_ms: 1_500,
+                end_ms: 3_000,
+                text: "привет".to_string(),
+                speaker: Some("SPEAKER_01".to_string()),
+            }],
+        }
+    }
+
+    /// Проверяет формат SRT.
+    #[test]
+    fn formats_srt() {
+        let text = format_srt(&sample());
+        assert!(text.contains("00:00:01,500 --> 00:00:03,000"));
+        assert!(text.contains("SPEAKER_01: привет"));
+    }
+
+    /// Проверяет формат WebVTT.
+    #[test]
+    fn formats_vtt() {
+        let text = format_vtt(&sample());
+        assert!(text.starts_with("WEBVTT"));
+        assert!(text.contains("00:00:01.500 --> 00:00:03.000"));
+    }
+
+    /// Проверяет разбор области.
+    #[test]
+    fn parses_region() {
+        let region = parse_region("10,20,800,600").expect("region");
+        assert_eq!(region.x, 10);
+        assert_eq!(region.width, 800);
+    }
 }

@@ -120,7 +120,7 @@ impl Server {
             "whisper": self.whisper_path().is_file(),
             "diarization": self.models_dir.join("diarization/segmentation.onnx").is_file()
                 && self.models_dir.join("diarization/embedding.onnx").is_file(),
-            "vad": self.models_dir.join("vad/silero_vad.onnx").is_file(),
+            "vad": self.models_dir.join("vad/ggml-silero-v5.1.2.bin").is_file(),
         })
     }
 
@@ -147,7 +147,11 @@ impl Server {
                 format!("модель ASR не найдена: {}", model.display()),
             );
         }
-        let engine = self.asr.get_or_insert_with(|| WhisperEngine::new(&model));
+        let vad = self.models_dir.join("vad/ggml-silero-v5.1.2.bin");
+        let vad = vad.is_file().then_some(vad);
+        let engine = self
+            .asr
+            .get_or_insert_with(|| WhisperEngine::with_vad(&model, vad));
         match engine.transcribe(
             &params.audio_path,
             params.language.as_deref(),

@@ -3,11 +3,14 @@
 use crate::audio::load_wav_16k_mono;
 use crate::{MlError, Transcript, TranscriptSegment};
 use std::path::{Path, PathBuf};
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperVadParams,
+};
 
 /// Движок распознавания речи с кэшем загруженной модели.
 pub struct WhisperEngine {
     model_path: PathBuf,
+    vad_path: Option<PathBuf>,
     context: Option<WhisperContext>,
     threads: i32,
 }
@@ -15,11 +18,17 @@ pub struct WhisperEngine {
 impl WhisperEngine {
     /// Создаёт движок; модель загружается при первом запросе.
     pub fn new(model_path: impl Into<PathBuf>) -> Self {
+        Self::with_vad(model_path, None)
+    }
+
+    /// Создаёт движок с опциональной моделью Silero VAD.
+    pub fn with_vad(model_path: impl Into<PathBuf>, vad_path: Option<PathBuf>) -> Self {
         let threads = std::thread::available_parallelism()
             .map(|count| count.get().min(8) as i32)
             .unwrap_or(4);
         Self {
             model_path: model_path.into(),
+            vad_path,
             context: None,
             threads,
         }
@@ -46,12 +55,33 @@ impl WhisperEngine {
         if samples.is_empty() {
             return Err(MlError::Inference("аудиофайл пуст".to_string()));
         }
+        self.transcribe_samples(&samples, language, timestamps)
+    }
+
+    /// Распознаёт переданный PCM-буфер.
+    fn transcribe_samples(
+        &mut self,
+        samples: &[f32],
+        language: Option<&str>,
+        timestamps: bool,
+    ) -> Result<Transcript, MlError> {
+        let vad_path = self
+            .vad_path
+            .as_ref()
+            .filter(|path| path.is_file())
+            .map(|path| path.to_string_lossy().to_string());
         let context = self.context()?;
         let mut state = context
             .create_state()
             .map_err(|error| MlError::Inference(format!("состояние whisper: {error}")))?;
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(self.threads);
+        params.set_no_context(true);
+        if let Some(vad_path) = vad_path.as_deref() {
+            params.set_vad_model_path(Some(vad_path));
+            params.enable_vad(true);
+            params.set_vad_params(WhisperVadParams::default());
+        }
         params.set_translate(false);
         params.set_language(language.filter(|value| *value != "auto"));
         params.set_print_special(false);
@@ -60,7 +90,7 @@ impl WhisperEngine {
         params.set_print_timestamps(false);
         params.set_token_timestamps(timestamps);
         state
-            .full(params, &samples)
+            .full(params, samples)
             .map_err(|error| MlError::Inference(format!("whisper: {error}")))?;
 
         let mut segments = Vec::new();
