@@ -202,7 +202,7 @@ impl Server {
             "models.status" => RpcResponse::ok(id, status),
             "asr.transcribe" => self.transcribe(id, params),
             "diarize.run" => {
-                RpcResponse::err(id, -32001, "модель диаризации ещё не подключена (этап 4)")
+                RpcResponse::err(id, -32601, "диаризация выполняется отдельным воркером")
             }
             "speaker.embed" => {
                 RpcResponse::err(id, -32001, "эмбеддинги спикеров ещё не подключены (этап 4)")

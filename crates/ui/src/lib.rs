@@ -17,9 +17,9 @@ use screenrecorder_adapters::{
     take_screenshot,
 };
 use screenrecorder_application::{
-    HistoryStore, ManifestState, MlWorker, Rect, SessionManifest, SessionRecord, Settings,
-    SettingsStore, TrackManifest, Transcript, append_session_log, display_date, import_manifests,
-    load_manifest, recover_incomplete, save_manifest,
+    DiarizeWorker, HistoryStore, ManifestState, MlWorker, Rect, SessionManifest, SessionRecord,
+    Settings, SettingsStore, TrackManifest, Transcript, append_session_log, assign_speakers,
+    display_date, import_manifests, load_manifest, recover_incomplete, save_manifest,
 };
 use screenrecorder_domain::{SessionId, TrackKind, TrackStats, TrackStatus};
 use std::path::{Path, PathBuf};
@@ -39,6 +39,7 @@ struct TranscriptOutput {
     json_path: PathBuf,
     segments: usize,
     language: String,
+    warning: Option<String>,
 }
 
 /// Каталог, который выбирает пользователь.
@@ -1133,23 +1134,44 @@ impl ScreenRecorderApp {
         }
         let mic = session_dir.join("mic.wav");
         let system = session_dir.join("system.wav");
-        let audio = if mic.metadata().is_ok_and(|meta| meta.len() > 44) {
-            mic
-        } else if system.metadata().is_ok_and(|meta| meta.len() > 44) {
-            system
-        } else {
+        let has_mic = mic.metadata().is_ok_and(|meta| meta.len() > 44);
+        let has_system = system.metadata().is_ok_and(|meta| meta.len() > 44);
+        if !has_mic && !has_system {
             self.log = "Распознавание пропущено: нет аудиодорожек.".to_string();
             return;
-        };
+        }
         let models_dir = self.paths.models_dir();
         let language = self.settings.transcription.language.clone();
+        let diarization_enabled = self.settings.diarization.enabled;
+        let min_speakers = self.settings.diarization.min_speakers;
+        let max_speakers = self.settings.diarization.max_speakers;
         let dir = session_dir.to_path_buf();
-        self.log = format!("ASR: {}", audio.display());
+        self.log = "ASR: подготовка аудио и запуск воркера…".to_string();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             let result = (|| {
+                let audio = if has_mic && has_system {
+                    let mix = dir.join("mix.wav");
+                    merge_audio(Some(system), Some(mic), &mix)
+                        .map_err(|error| format!("микс аудио: {error}"))?;
+                    mix
+                } else if has_mic {
+                    mic
+                } else {
+                    system
+                };
                 let mut worker = MlWorker::spawn(&models_dir)?;
-                let transcript = worker.transcribe(&audio, Some(&language), true)?;
+                let mut transcript = worker.transcribe(&audio, Some(&language), true)?;
+                drop(worker);
+                let mut warning = None;
+                if diarization_enabled {
+                    match DiarizeWorker::spawn(&models_dir)
+                        .and_then(|mut worker| worker.diarize(&audio, min_speakers, max_speakers))
+                    {
+                        Ok(turns) => assign_speakers(&mut transcript, &turns),
+                        Err(error) => warning = Some(format!("диаризация: {error}")),
+                    }
+                }
                 let text_path = dir.join("transcript.txt");
                 let json_path = dir.join("transcript.json");
                 std::fs::write(&text_path, format_transcript(&transcript))
@@ -1163,6 +1185,7 @@ impl ScreenRecorderApp {
                     json_path,
                     segments: transcript.segments.len(),
                     language: transcript.language,
+                    warning,
                 })
             })();
             let _ = sender.send(result);
@@ -1193,11 +1216,15 @@ impl ScreenRecorderApp {
             Ok(output) => {
                 self.status = "Транскрипция готова".to_string();
                 self.log = format!(
-                    "Текст: {} · JSON: {} ({} сегментов, язык {})",
+                    "Текст: {} · JSON: {} ({} сегментов, язык {}){}",
                     output.text_path.display(),
                     output.json_path.display(),
                     output.segments,
-                    output.language
+                    output.language,
+                    output
+                        .warning
+                        .map(|warning| format!(" · {warning}"))
+                        .unwrap_or_default()
                 );
                 if let Some(dir) = self.session_dir.clone()
                     && let Ok(mut manifest) = load_manifest(&dir)
@@ -2191,11 +2218,14 @@ fn state_label(state: &str) -> &'static str {
 fn format_transcript(transcript: &Transcript) -> String {
     let mut output = String::new();
     for segment in &transcript.segments {
+        let text = match &segment.speaker {
+            Some(speaker) => format!("{speaker}: {}", segment.text.trim()),
+            None => segment.text.trim().to_string(),
+        };
         output.push_str(&format!(
-            "[{} - {}] {}\n",
+            "[{} - {}] {text}\n",
             format_ms(segment.start_ms),
-            format_ms(segment.end_ms),
-            segment.text.trim()
+            format_ms(segment.end_ms)
         ));
     }
     output

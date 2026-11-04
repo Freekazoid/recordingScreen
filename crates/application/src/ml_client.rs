@@ -22,6 +22,14 @@ pub struct Transcript {
     pub segments: Vec<TranscriptSegment>,
 }
 
+/// Реплика спикера.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeakerTurn {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub speaker: String,
+}
+
 /// Запущенный ML-воркер.
 pub struct MlWorker {
     child: Child,
@@ -135,6 +143,128 @@ impl Drop for MlWorker {
     }
 }
 
+/// Запущенный воркер диаризации (отдельный процесс, без whisper).
+pub struct DiarizeWorker {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    next_id: u64,
+}
+
+impl DiarizeWorker {
+    /// Запускает `screenrecorder-diarize`.
+    pub fn spawn(models_dir: &Path) -> Result<Self, String> {
+        let binary = find_diarize_binary()?;
+        let mut child = Command::new(&binary)
+            .env("SCREENRECORDER_MODELS_DIR", models_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("воркер диаризации {}: {error}", binary.display()))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "воркер диаризации: нет stdin".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "воркер диаризации: нет stdout".to_string())?;
+        Ok(Self {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+            next_id: 1,
+        })
+    }
+
+    /// Размечает спикеров.
+    pub fn diarize(
+        &mut self,
+        audio: &Path,
+        min_speakers: Option<u32>,
+        max_speakers: Option<u32>,
+    ) -> Result<Vec<SpeakerTurn>, String> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "diarize.run",
+            "params": {
+                "audio_path": audio,
+                "min_speakers": min_speakers,
+                "max_speakers": max_speakers,
+            },
+        });
+        writeln!(self.stdin, "{request}").map_err(|error| format!("diarize stdin: {error}"))?;
+        self.stdin
+            .flush()
+            .map_err(|error| format!("diarize flush: {error}"))?;
+        let mut line = String::new();
+        let read = self
+            .stdout
+            .read_line(&mut line)
+            .map_err(|error| format!("diarize stdout: {error}"))?;
+        if read == 0 {
+            let status = self.child.try_wait().ok().flatten();
+            return Err(format!("воркер диаризации завершился: {status:?}"));
+        }
+        let response: serde_json::Value =
+            serde_json::from_str(&line).map_err(|error| format!("ответ диаризации: {error}"))?;
+        if let Some(error) = response.get("error") {
+            return Err(error
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or("ошибка диаризации")
+                .to_string());
+        }
+        let result = response
+            .get("result")
+            .cloned()
+            .ok_or_else(|| "воркер диаризации вернул пустой ответ".to_string())?;
+        serde_json::from_value(result).map_err(|error| format!("сегменты диаризации: {error}"))
+    }
+}
+
+impl Drop for DiarizeWorker {
+    /// Завершает воркер при выходе.
+    fn drop(&mut self) {
+        let _ = writeln!(
+            self.stdin,
+            r#"{{"jsonrpc":"2.0","id":0,"method":"shutdown"}}"#
+        );
+        let _ = self.stdin.flush();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Ищет бинарник воркера диаризации рядом с приложением.
+fn find_diarize_binary() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("SCREENRECORDER_DIARIZE_BIN") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(format!(
+            "SCREENRECORDER_DIARIZE_BIN указывает на несуществующий файл: {}",
+            path.display()
+        ));
+    }
+    let exe = std::env::current_exe().map_err(|error| format!("current_exe: {error}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "не удалось определить каталог приложения".to_string())?;
+    for name in ["screenrecorder-diarize", "screenrecorder-diarize.exe"] {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err("воркер диаризации не найден; соберите screenrecorder-diarize".to_string())
+}
+
 /// Ищет бинарник ML-воркера рядом с приложением.
 ///
 /// Возвращает путь и признак `--ml-worker`: если отдельного бинарника нет,
@@ -161,6 +291,27 @@ fn find_worker_binary() -> Result<(PathBuf, bool), String> {
         }
     }
     Ok((exe, true))
+}
+
+/// Назначает спикеров сегментам по максимальному пересечению.
+pub fn assign_speakers(transcript: &mut Transcript, turns: &[SpeakerTurn]) {
+    for segment in &mut transcript.segments {
+        let mut best: Option<(u64, &str)> = None;
+        for turn in turns {
+            let start = segment.start_ms.max(turn.start_ms);
+            let end = segment.end_ms.min(turn.end_ms);
+            if end <= start {
+                continue;
+            }
+            let overlap = end - start;
+            if best.is_none_or(|(current, _)| overlap > current) {
+                best = Some((overlap, turn.speaker.as_str()));
+            }
+        }
+        if let Some((_, speaker)) = best {
+            segment.speaker = Some(speaker.to_string());
+        }
+    }
 }
 
 #[cfg(test)]

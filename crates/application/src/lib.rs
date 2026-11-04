@@ -12,5 +12,7 @@ pub use manifest::{
     TrackManifest, append_session_log, load_manifest, manifest_path, recover_incomplete,
     save_manifest,
 };
-pub use ml_client::{MlWorker, Transcript, TranscriptSegment};
+pub use ml_client::{
+    DiarizeWorker, MlWorker, SpeakerTurn, Transcript, TranscriptSegment, assign_speakers,
+};
 pub use settings::{DEFAULT_SETTINGS_JSON, SCHEMA_VERSION, Settings, SettingsError, SettingsStore};
