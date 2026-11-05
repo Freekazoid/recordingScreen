@@ -1253,11 +1253,7 @@ impl ScreenRecorderApp {
             FolderTarget::Models => ("Папка моделей", &self.settings.models_dir),
             FolderTarget::Output => ("Папка результатов", &self.settings.output_dir),
         };
-        let start = if current.trim().is_empty() {
-            self.paths.data_dir.clone()
-        } else {
-            PathBuf::from(current)
-        };
+        let start = folder_dialog_start(current, &self.paths.data_dir);
         let title = title.to_string();
         let (sender, receiver) = mpsc::channel();
         let dialog_title = title.clone();
@@ -1365,9 +1361,15 @@ impl ScreenRecorderApp {
             self.log = "Другая модель уже скачивается.".to_string();
             return;
         }
-        if self.settings.models_dir.trim().is_empty() {
+        let models_dir = self.settings.models_dir.trim();
+        if models_dir.is_empty() || !Path::new(models_dir).is_dir() {
+            if !models_dir.is_empty() {
+                self.log =
+                    format!("Папка моделей не найдена: {models_dir}. Выберите существующую папку.");
+            } else {
+                self.log = "Выберите папку моделей — после выбора скачивание начнётся.".to_string();
+            }
             self.pending_model_download = Some(id);
-            self.log = "Выберите папку моделей — после выбора скачивание начнётся.".to_string();
             self.pick_folder(FolderTarget::Models);
             return;
         }
@@ -4675,6 +4677,32 @@ fn microphone_gain_db(session_dir: &Path) -> f32 {
     }
 }
 
+/// Выбирает существующий каталог для старта диалога.
+///
+/// Пользователь мог указать удалённую/переименованную папку. rfd/GTK не
+/// умеет открываться в несуществующем каталоге и показывает ошибку,
+/// поэтому поднимаемся к ближайшему существующему родителю.
+fn folder_dialog_start(current: &str, fallback: &Path) -> PathBuf {
+    let mut path = if current.trim().is_empty() {
+        fallback.to_path_buf()
+    } else {
+        PathBuf::from(current.trim())
+    };
+    if path.is_dir() {
+        return path;
+    }
+    while let Some(parent) = path.parent() {
+        if parent.as_os_str().is_empty() {
+            break;
+        }
+        path = parent.to_path_buf();
+        if path.is_dir() {
+            return path;
+        }
+    }
+    fallback.to_path_buf()
+}
+
 /// Фактический корень моделей с учётом выбранной папки.
 fn models_root_for(paths: &Paths, setting: &str) -> PathBuf {
     resolve_models_root(setting, &paths.models_dir())
@@ -5233,6 +5261,19 @@ mod tests {
         let region = parse_region("10,20,800,600").expect("region");
         assert_eq!(region.x, 10);
         assert_eq!(region.width, 800);
+    }
+
+    /// Проверяет выбор существующей папки для диалога.
+    #[test]
+    fn folder_dialog_uses_existing_parent() {
+        let temp = tempfile::tempdir().expect("temp");
+        let nested = temp.path().join("missing").join("deeper");
+        let start = folder_dialog_start(nested.to_str().expect("utf8"), Path::new("/fallback"));
+        assert_eq!(start, temp.path().to_path_buf());
+        assert_eq!(
+            folder_dialog_start("", temp.path()),
+            temp.path().to_path_buf()
+        );
     }
 
     /// Проверяет копирование транскриптов рядом с видео.
