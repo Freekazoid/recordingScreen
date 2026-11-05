@@ -425,6 +425,24 @@ impl ScreenRecorderApp {
         if daemon {
             app.init_tray();
             app.init_hotkeys();
+        } else {
+            #[cfg(target_os = "linux")]
+            std::thread::spawn(|| {
+                // Окно уже создано eframe. Убираем кнопку maximize через
+                // Motif hints; Mutter перечитывает их при повторном map.
+                let pid = std::process::id();
+                for _ in 0..10 {
+                    match x11_activation::disable_maximize(pid) {
+                        Ok(true) => return,
+                        Ok(false) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "не удалось убрать кнопку maximize");
+                            return;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            });
         }
         app
     }
@@ -2067,13 +2085,18 @@ impl ScreenRecorderApp {
         self.ml_asr_passes = asr_passes;
         self.ml_total_phases = total_phases;
         let dir = session_dir.to_path_buf();
+        // Таймкоды WAV не совпадают с итоговым видео: при экспорте аудио
+        // задерживается на audio_offset_ms. Сдвигаем субтитры туда же.
+        let offset_ms = load_manifest(session_dir)
+            .map(|manifest| manifest.audio_offset_ms)
+            .unwrap_or(self.audio_offset_ms);
         self.log = "ASR: подготовка аудио и запуск воркера…".to_string();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             let result = (|| {
                 let mut warning = None;
                 let mut worker = MlWorker::spawn(&models_dir)?;
-                let transcript = if has_mic && has_system {
+                let mut transcript = if has_mic && has_system {
                     // Channel-aware: system и mic транскрибируются отдельно,
                     // затем сегменты сливаются по времени.
                     let mut system_transcript = worker.transcribe(
@@ -2155,6 +2178,7 @@ impl ScreenRecorderApp {
                     }
                     transcript
                 };
+                shift_transcript(&mut transcript, offset_ms);
                 drop(worker);
                 let text_path = dir.join("transcript.txt");
                 let json_path = dir.join("transcript.json");
@@ -4347,6 +4371,20 @@ fn format_vtt_time(ms: u64) -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02}.{millis:03}")
 }
 
+/// Сдвигает таймкоды транскрипта на смещение аудио.
+///
+/// При экспорте ffmpeg задерживает аудиодорожки на `audio_offset_ms`,
+/// поэтому субтитры из WAV нужно сдвинуть на ту же величину.
+fn shift_transcript(transcript: &mut Transcript, offset_ms: i64) {
+    if offset_ms == 0 {
+        return;
+    }
+    for segment in &mut transcript.segments {
+        segment.start_ms = segment.start_ms.saturating_add_signed(offset_ms);
+        segment.end_ms = segment.end_ms.saturating_add_signed(offset_ms);
+    }
+}
+
 /// Форматирует транскрипт в текстовый файл с таймкодами.
 fn format_transcript(transcript: &Transcript) -> String {
     let mut output = String::new();
@@ -4516,6 +4554,9 @@ pub fn run(paths: Paths, settings: Settings) -> Result<(), String> {
             .with_min_inner_size([380.0, 600.0])
             .with_resizable(false)
             .with_taskbar(false)
+            .with_minimize_button(true)
+            .with_maximize_button(false)
+            .with_close_button(true)
             .with_app_id("screenrecorder")
             .with_title("Рекордер экрана"),
         ..Default::default()
@@ -4589,6 +4630,18 @@ mod tests {
         let text = format_markdown(&sample());
         assert!(text.starts_with("# Транскрипт"));
         assert!(text.contains("**спикер_1** привет"));
+    }
+
+    /// Проверяет сдвиг субтитров на смещение аудио.
+    #[test]
+    fn shifts_transcript_by_audio_offset() {
+        let mut transcript = sample();
+        shift_transcript(&mut transcript, 3_312);
+        assert_eq!(transcript.segments[0].start_ms, 4_812);
+        assert_eq!(transcript.segments[0].end_ms, 6_312);
+        shift_transcript(&mut transcript, -10_000);
+        assert_eq!(transcript.segments[0].start_ms, 0);
+        assert_eq!(transcript.segments[0].end_ms, 0);
     }
 
     /// Проверяет приоритет X11 и запасной Wayland.

@@ -15,6 +15,69 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::wrapper::ConnectionExt as _;
 
+/// Оставляет в заголовке X11-окна только «свернуть» и «закрыть».
+///
+/// Mutter учитывает Motif hints при повторном map: без `MWM_FUNC_MAXIMIZE`
+/// кнопка maximize пропадает. Функции: resize|move|minimize|close.
+pub(crate) fn disable_maximize(pid: u32) -> Result<bool, String> {
+    let (connection, screen_number) = x11rb::connect(None).map_err(|error| error.to_string())?;
+    let root = connection.setup().roots[screen_number].root;
+    let atom = |name: &str| -> Result<u32, String> {
+        connection
+            .intern_atom(false, name.as_bytes())
+            .map_err(|error| error.to_string())?
+            .reply()
+            .map(|reply| reply.atom)
+            .map_err(|error| error.to_string())
+    };
+    let client_list = atom("_NET_CLIENT_LIST")?;
+    let pid_atom = atom("_NET_WM_PID")?;
+    let motif_atom = atom("_MOTIF_WM_HINTS")?;
+    let windows = connection
+        .get_property(false, root, client_list, AtomEnum::WINDOW, 0, 1024)
+        .map_err(|error| error.to_string())?
+        .reply()
+        .map_err(|error| error.to_string())?
+        .value32()
+        .ok_or_else(|| "пустой список окон X11".to_string())?
+        .collect::<Vec<_>>();
+    for window in windows {
+        let owner = connection
+            .get_property(false, window, pid_atom, AtomEnum::CARDINAL, 0, 1)
+            .map_err(|error| error.to_string())?
+            .reply()
+            .map_err(|error| error.to_string())?
+            .value32()
+            .and_then(|mut values| values.next());
+        if owner != Some(pid) {
+            continue;
+        }
+        // flags=FUNCTIONS|DECORATIONS; без MAXIMIZE; decorations=all.
+        connection
+            .change_property32(
+                PropMode::REPLACE,
+                window,
+                motif_atom,
+                motif_atom,
+                &[3, 46, 1, 0, 0],
+            )
+            .map_err(|error| error.to_string())?;
+        connection.flush().map_err(|error| error.to_string())?;
+        // Mutter перечитывает Motif hints только при повторном map.
+        connection
+            .unmap_window(window)
+            .map_err(|error| error.to_string())?;
+        connection.flush().map_err(|error| error.to_string())?;
+        std::thread::sleep(Duration::from_millis(120));
+        connection
+            .map_window(window)
+            .map_err(|error| error.to_string())?;
+        connection.flush().map_err(|error| error.to_string())?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// Находит окно процесса и делает его видимым на текущем рабочем столе.
 ///
 /// Возвращает `Ok(false)`, если окно ещё не появилось в `_NET_CLIENT_LIST`
