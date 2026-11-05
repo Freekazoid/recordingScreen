@@ -4516,6 +4516,7 @@ pub fn run(paths: Paths, settings: Settings) -> Result<(), String> {
             .with_min_inner_size([380.0, 600.0])
             .with_resizable(false)
             .with_taskbar(false)
+            .with_app_id("screenrecorder")
             .with_title("Рекордер экрана"),
         ..Default::default()
     };
@@ -4533,7 +4534,9 @@ pub fn run(paths: Paths, settings: Settings) -> Result<(), String> {
     }
 
     eframe::run_native(
-        "Рекордер экрана",
+        // WM_CLASS/application id оставляем ASCII: GNOME показывает его в
+        // диалоге «приложение не отвечает»; кириллица там ломается.
+        "Screen Recorder",
         options,
         Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);

@@ -3,9 +3,40 @@
 //! Видео и аудиодорожки лежат раздельно; при экспорте они сводятся в один
 //! контейнер с выбранным форматом, CRF и режимом звука.
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
+
+/// Приоритет ffmpeg ниже, чем у окна и compositor.
+#[cfg(unix)]
+const FFMPEG_NICE: i32 = 10;
+
+/// Создаёт команду ffmpeg с пониженным приоритетом.
+///
+/// Экспорт 1080p занимает все доступные ядра и может на несколько секунд
+/// заблокировать отрисовку окна. Пониженный приоритет оставляет CPU
+/// интерфейсу и compositor'у.
+fn ffmpeg_command(args: &[String]) -> Command {
+    let mut command = Command::new("ffmpeg");
+    command.args(args);
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            libc::setpriority(libc::PRIO_PROCESS, 0, FFMPEG_NICE);
+            Ok(())
+        });
+    }
+    command
+}
+
+/// Ограничивает число потоков экспорта, чтобы не забирать все ядра.
+fn export_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|count| (count.get() / 2).clamp(2, 6))
+        .unwrap_or(4)
+}
 
 /// Ошибки экспорта.
 #[derive(Debug, Error)]
@@ -73,7 +104,7 @@ pub fn merge_recording(request: &ExportRequest) -> Result<PathBuf, MediaError> {
     }
 
     let args = build_args(request);
-    let output = Command::new("ffmpeg").args(&args).output()?;
+    let output = ffmpeg_command(&args).output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(MediaError::Ffmpeg(
@@ -151,7 +182,7 @@ pub fn merge_audio(
         "-y".to_string(),
         output.to_string_lossy().to_string(),
     ]);
-    let result = Command::new("ffmpeg").args(&args).output()?;
+    let result = ffmpeg_command(&args).output()?;
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
         return Err(MediaError::Ffmpeg(
@@ -170,6 +201,8 @@ fn build_args(request: &ExportRequest) -> Vec<String> {
         "warning".to_string(),
         "-nostdin".to_string(),
         "-y".to_string(),
+        "-threads".to_string(),
+        export_threads().to_string(),
         "-i".to_string(),
         request.video.to_string_lossy().to_string(),
     ];
@@ -236,6 +269,7 @@ fn build_args(request: &ExportRequest) -> Vec<String> {
         args.extend(["-map".to_string(), "0:v:0".to_string(), "-an".to_string()]);
     }
 
+    args.extend(["-threads".to_string(), export_threads().to_string()]);
     args.extend(video_args(&format, request.crf));
     if audio_enabled {
         args.extend(audio_args(&format));

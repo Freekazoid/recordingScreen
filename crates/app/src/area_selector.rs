@@ -24,12 +24,13 @@ pub fn run(image_path: &Path, out_path: &Path) -> anyhow::Result<()> {
             .with_position([0.0, 0.0])
             .with_decorations(false)
             .with_always_on_top()
+            .with_app_id("screenrecorder-area")
             .with_title("Выбор области"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Выбор области",
+        "Screen Recorder Area",
         options,
         Box::new(move |cc| {
             let texture = cc.egui_ctx.load_texture(
