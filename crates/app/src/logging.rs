@@ -9,6 +9,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::fmt::time::ChronoLocal;
 
 /// Ограничение размера текущего лога перед ротацией.
 const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
@@ -37,6 +38,7 @@ pub fn init(paths: &Paths, role: &str) -> Result<(), String> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(writer)
+        .with_timer(ChronoLocal::rfc_3339())
         .with_ansi(false)
         .with_target(true)
         .try_init();
