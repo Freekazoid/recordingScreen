@@ -4381,6 +4381,7 @@ dependencies = [
  "tracing",
  "tray-icon",
  "winit",
+ "x11rb",
 ]
 
 [[package]]

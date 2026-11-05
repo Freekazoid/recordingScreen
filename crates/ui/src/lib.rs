@@ -8,6 +8,8 @@
 mod daemon;
 mod ipc;
 mod protocol;
+#[cfg(target_os = "linux")]
+mod x11_activation;
 
 pub use daemon::run_daemon;
 
@@ -3911,13 +3913,18 @@ impl ScreenRecorderApp {
             Ok(Response::Snapshot(snapshot)) => {
                 self.daemon_lost_at = None;
                 if snapshot.show_requested {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     if self.ui_backend == UiBackend::Wayland {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                         ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                             egui::UserAttentionType::Critical,
                         ));
+                    } else {
+                        // На X11 не просим фокус: GNOME может ответить
+                        // уведомлением «окно ожидает». Окно само переедет
+                        // на текущий стол и поднимется.
+                        request_x11_activation();
                     }
                     if let Some(client) = self.client.as_mut() {
                         let _ = client.request(&Request::AckShow);
@@ -4067,6 +4074,33 @@ fn ui_executable() -> Result<PathBuf, String> {
         Err(format!("исполняемый файл не найден: {}", path.display()))
     }
 }
+
+/// Запускает в фоне перенос и активацию X11-окна.
+///
+/// Окно могло остаться на другом рабочем столе или быть свёрнутым.
+/// Повторяем попытки, пока окно не появится в списке клиентов X11.
+#[cfg(target_os = "linux")]
+fn request_x11_activation() {
+    let pid = std::process::id();
+    std::thread::spawn(move || {
+        for _ in 0..15 {
+            match x11_activation::activate(pid) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "активация X11-окна");
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        tracing::warn!("X11-окно для активации не найдено");
+    });
+}
+
+/// Заглушка для не-Linux платформ.
+#[cfg(not(target_os = "linux"))]
+fn request_x11_activation() {}
 
 /// Переводит название режима из снимка в статическую строку.
 fn recording_mode_static(mode: &str) -> Option<&'static str> {

@@ -49,6 +49,7 @@ url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 whisper-rs = "0.16"
 winit = "0.30"
+x11rb = "0.13"
 
 [profile.release]
 lto = "thin"
