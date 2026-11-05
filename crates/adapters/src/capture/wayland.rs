@@ -4,9 +4,9 @@
 //! PipeWire FD запускается `gst-launch-1.0` с `pipewiresrc`; запись идёт
 //! в MKV. Остановка — SIGINT, чтобы GStreamer корректно закрыл файл.
 
-use super::Region;
 use super::portal_token;
 use super::segments::concat_segments;
+use super::{PORTAL_CANCELLED, PortalSource, Region};
 use crate::portal;
 use ashpd::desktop::screencast::{
     CursorMode, Screencast, SelectSourcesOptions, SourceType, Stream,
@@ -20,16 +20,6 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-
-/// Что выбирает пользователь в портале.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PortalSource {
-    Monitor,
-    Window,
-}
-
-/// Сообщение, когда пользователь закрыл диалог портала без подтверждения.
-pub const PORTAL_CANCELLED: &str = "доступ к экрану не предоставлен";
 
 /// Рекордер Wayland-экрана через портал.
 #[derive(Debug, Default)]

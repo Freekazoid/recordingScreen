@@ -322,6 +322,8 @@ fn resolve_target(target: Option<&str>, kind: AudioDeviceKind) -> Result<String,
 /// Иначе после `kill -9` сервиса процессы записи остаются сиротами и
 /// продолжают писать в старую сессию, занимая устройства.
 fn die_with_parent(command: &mut std::process::Command) {
+    #[cfg(not(unix))]
+    let _ = command;
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;

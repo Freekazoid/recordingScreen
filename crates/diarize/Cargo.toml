@@ -14,8 +14,13 @@ anyhow.workspace = true
 hound.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sherpa-onnx-sys.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+sherpa-onnx-sys.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+sherpa-onnx-sys = { workspace = true, default-features = false, features = ["shared"] }
 
 [dev-dependencies]
 tempfile.workspace = true

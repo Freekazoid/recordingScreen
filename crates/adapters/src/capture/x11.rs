@@ -4,31 +4,10 @@
 //! он запускает/останавливает ffmpeg. Это позволяет позже добавить
 //! Wayland-портал и аудиодорожки за тем же интерфейсом.
 
-use super::Region;
 use super::segments::concat_segments;
+use super::{CaptureError, Region, WindowInfo};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use thiserror::Error;
-
-/// Ошибки запуска и остановки записи.
-#[derive(Debug, Error)]
-pub enum CaptureError {
-    #[error("запись уже запущена")]
-    AlreadyRunning,
-
-    #[error("не удалось создать каталог {path}: {source}")]
-    CreateDir {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("не удалось запустить ffmpeg: {0}")]
-    Spawn(#[from] std::io::Error),
-
-    #[error("не удалось остановить ffmpeg: {0}")]
-    Stop(std::io::Error),
-}
 
 /// Рекордер X11-экрана.
 #[derive(Debug, Default)]
@@ -197,14 +176,6 @@ fn build_args(
             .to_string_lossy()
             .to_string(),
     ]
-}
-
-/// Окно X11 для выбора «Программа».
-#[derive(Debug, Clone)]
-pub struct WindowInfo {
-    pub id: u64,
-    pub title: String,
-    pub region: Region,
 }
 
 /// Возвращает список видимых окон X11.

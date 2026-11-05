@@ -43,7 +43,12 @@ pub fn concat_segments(output: &Path) -> Result<(), String> {
     let list = parent.join("segments.txt");
     let mut content = String::new();
     for segment in &segments {
-        let path = segment.display().to_string().replace('\'', "'\\''");
+        let path = segment.display().to_string();
+        // В списке concat-демуксера обратный слэш — escape-символ, поэтому
+        // на Windows пути переводим в прямой слэш, который ffmpeg понимает.
+        #[cfg(windows)]
+        let path = path.replace('\\', "/");
+        let path = path.replace('\'', "'\\''");
         content.push_str(&format!("file '{path}'\n"));
     }
     fs::write(&list, content).map_err(|error| format!("список сегментов: {error}"))?;

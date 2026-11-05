@@ -31,12 +31,23 @@ enum Event {
 
 /// Запускает фоновый сервис до завершения.
 pub fn run_daemon(paths: Paths, settings: Settings) -> Result<(), String> {
+    #[cfg(windows)]
+    let _lock = match crate::win32::daemon_lock()? {
+        Some(lock) => lock,
+        None => {
+            tracing::info!("сервис уже запущен (mutex)");
+            return Ok(());
+        }
+    };
     let endpoint = ipc::socket_path(&paths);
     ipc::ensure_socket_dir(&endpoint)?;
     #[cfg(unix)]
     let listener = bind_socket(&endpoint)?;
     #[cfg(windows)]
-    let (listener, token) = bind_tcp(&endpoint)?;
+    let (listener, token) = match bind_tcp(&endpoint)? {
+        Some((listener, token)) => (Some(listener), token),
+        None => (None, String::new()),
+    };
     let Some(listener) = listener else {
         tracing::info!("сервис уже запущен");
         return Ok(());
@@ -57,6 +68,8 @@ pub fn run_daemon(paths: Paths, settings: Settings) -> Result<(), String> {
         if app.quit_requested {
             break Ok(());
         }
+        #[cfg(windows)]
+        crate::win32::pump_messages();
         if last_tick.elapsed() >= Duration::from_millis(100) {
             app.tick_daemon();
             last_tick = Instant::now();
@@ -307,9 +320,12 @@ fn handle_request(app: &mut ScreenRecorderApp, request: Request) -> Response {
             Response::Ok
         }
         Request::HotkeyParent { xid } => {
+            #[cfg(target_os = "linux")]
             if let Some(sender) = &app.portal_parent_tx {
                 let _ = sender.send(xid);
             }
+            #[cfg(not(target_os = "linux"))]
+            let _ = xid;
             Response::Ok
         }
         Request::ShowUi => {

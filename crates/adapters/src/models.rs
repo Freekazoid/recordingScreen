@@ -102,6 +102,58 @@ pub const MODELS: &[ModelSpec] = &[
     },
 ];
 
+/// Имена файлов-маркеров, по которым узнаём корень моделей.
+const WHISPER_MARKER: &str = "whisper/ggml-large-v3-turbo-q5_0.bin";
+const VAD_MARKER: &str = "vad/ggml-silero-v5.1.2.bin";
+const SEGMENTATION_MARKER: &str = "diarization/segmentation.onnx";
+const EMBEDDING_MARKER: &str = "diarization/embedding.onnx";
+const NEMO_MARKER: &str = "nemo/nemotron3_diar_v3.onnx";
+
+/// Считает, сколько известных моделей лежит прямо в каталоге.
+fn layout_score(root: &Path) -> usize {
+    let mut score = 0;
+    if root.join(WHISPER_MARKER).is_file() {
+        score += 1;
+    }
+    if root.join(VAD_MARKER).is_file() {
+        score += 1;
+    }
+    if root.join(SEGMENTATION_MARKER).is_file() && root.join(EMBEDDING_MARKER).is_file() {
+        score += 1;
+    }
+    if root.join(NEMO_MARKER).is_file() {
+        score += 1;
+    }
+    score
+}
+
+/// Превращает настройку «Папка моделей» в фактический корень моделей.
+///
+/// Пользователь может указать:
+/// - родительский каталог — модели лежат в `<папка>/models` (канонично);
+/// - сам корень моделей — тогда используем его как есть;
+/// - старую раскладку `<папка>/model`.
+///
+/// Если в выбранной папке уже есть модели, повторно их не качаем. Пустая
+/// настройка означает каталог по умолчанию (`<data>/models`).
+pub fn resolve_models_root(models_dir: &str, default_root: &Path) -> PathBuf {
+    let setting = models_dir.trim();
+    if setting.is_empty() {
+        return default_root.to_path_buf();
+    }
+    let base = PathBuf::from(setting);
+    let mut best = base.join("models");
+    let mut best_score = layout_score(&best);
+    for candidate in [base.clone(), base.join("model")] {
+        let score = layout_score(&candidate);
+        if score > best_score {
+            best = candidate;
+            best_score = score;
+        }
+    }
+    best
+}
+
 /// Прогресс загрузки.
 #[derive(Debug, Clone)]
 pub struct DownloadProgress {
@@ -137,6 +189,22 @@ impl ModelManager {
         spec.files.iter().all(|file| {
             let path = self.file_path(spec, file);
             fs::metadata(path)
+                .map(|metadata| metadata.len() > 0)
+                .unwrap_or(false)
+        })
+    }
+
+    /// Проверяет, что часть файлов модели уже есть (докачка).
+    pub fn is_partial(&self, id: &str) -> bool {
+        if self.is_downloaded(id) {
+            return false;
+        }
+        let Some(spec) = Self::spec(id) else {
+            return false;
+        };
+        spec.files.iter().any(|file| {
+            let path = self.file_path(spec, file);
+            fs::metadata(&path)
                 .map(|metadata| metadata.len() > 0)
                 .unwrap_or(false)
         })
@@ -401,5 +469,74 @@ mod tests {
         let manager = ModelManager::new(dir.path());
         manager.download("vad", |_| {}).expect("скачивание");
         assert!(manager.is_downloaded("vad"));
+    }
+}
+
+#[cfg(test)]
+mod models_dir_tests {
+    use super::*;
+
+    /// Создаёт пустой файл-маркер вместе с родительскими каталогами.
+    fn touch(root: &Path, relative: &str) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("каталог");
+        std::fs::write(path, b"x").expect("файл");
+    }
+
+    /// Проверяет каноничную раскладку `<папка>/models`.
+    #[test]
+    fn resolves_canonical_models_dir() {
+        let temp = tempfile::tempdir().expect("temp");
+        touch(temp.path(), "models/vad/ggml-silero-v5.1.2.bin");
+        let root = resolve_models_root(
+            temp.path().to_str().expect("utf8"),
+            Path::new("/default/models"),
+        );
+        assert_eq!(root, temp.path().join("models"));
+    }
+
+    /// Проверяет, что пользователь может указать сам корень моделей.
+    #[test]
+    fn resolves_direct_root() {
+        let temp = tempfile::tempdir().expect("temp");
+        touch(temp.path(), "whisper/ggml-large-v3-turbo-q5_0.bin");
+        let root = resolve_models_root(
+            temp.path().to_str().expect("utf8"),
+            Path::new("/default/models"),
+        );
+        assert_eq!(root, temp.path());
+    }
+
+    /// Проверяет старую раскладку `<папка>/model`.
+    #[test]
+    fn resolves_legacy_model_dir() {
+        let temp = tempfile::tempdir().expect("temp");
+        touch(temp.path(), "model/nemo/nemotron3_diar_v3.onnx");
+        let root = resolve_models_root(
+            temp.path().to_str().expect("utf8"),
+            Path::new("/default/models"),
+        );
+        assert_eq!(root, temp.path().join("model"));
+    }
+
+    /// Проверяет, что недокачанная модель распознаётся как частичная.
+    #[test]
+    fn detects_partial_model() {
+        let temp = tempfile::tempdir().expect("temp");
+        let manager = ModelManager::new(temp.path());
+        assert!(!manager.is_partial("diarization"));
+        touch(temp.path(), "diarization/segmentation.onnx");
+        assert!(manager.is_partial("diarization"));
+        assert!(!manager.is_downloaded("diarization"));
+        touch(temp.path(), "diarization/embedding.onnx");
+        assert!(manager.is_downloaded("diarization"));
+        assert!(!manager.is_partial("diarization"));
+    }
+
+    /// Пустая настройка ведёт в каталог по умолчанию.
+    #[test]
+    fn resolves_default_for_empty_setting() {
+        let root = resolve_models_root("", Path::new("/default/models"));
+        assert_eq!(root, Path::new("/default/models"));
     }
 }

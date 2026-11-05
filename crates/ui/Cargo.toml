@@ -9,7 +9,7 @@ license.workspace = true
 screenrecorder-adapters = { path = "../adapters" }
 screenrecorder-application = { path = "../application" }
 screenrecorder-domain = { path = "../domain" }
-ashpd.workspace = true
+
 chrono.workspace = true
 futures-lite.workspace = true
 eframe.workspace = true
@@ -28,7 +28,16 @@ winit.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+ashpd.workspace = true
 libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb.workspace = true

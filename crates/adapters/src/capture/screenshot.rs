@@ -154,7 +154,7 @@ async fn open_stream() -> Result<(Screencast, Session<Screencast>, OwnedFd, u32)
             .response()
             .map_err(|error| match error {
                 ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => {
-                    crate::capture::wayland::PORTAL_CANCELLED.to_string()
+                    super::PORTAL_CANCELLED.to_string()
                 }
                 error => format!("Start response: {error}"),
             })?;

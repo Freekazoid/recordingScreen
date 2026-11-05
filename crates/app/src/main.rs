@@ -3,6 +3,8 @@
 //! Поддерживает окно, фоновый сервис, `--diagnose`, `--select-area` и
 //! `--ml-worker`.
 
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod area_selector;
 mod logging;
 
@@ -61,7 +63,14 @@ fn main() -> anyhow::Result<()> {
     }
     if args.iter().any(|arg| arg == "--ml-worker") {
         logging::init_stderr();
-        return screenrecorder_ml_worker::run_stdio();
+        #[cfg(unix)]
+        {
+            return screenrecorder_ml_worker::run_stdio();
+        }
+        #[cfg(not(unix))]
+        {
+            anyhow::bail!("встроенный ML-воркер недоступен; используйте screenrecorder-ml.exe");
+        }
     }
 
     let paths = Paths::discover().context("не удалось определить каталоги приложения")?;

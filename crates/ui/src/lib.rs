@@ -10,6 +10,8 @@ mod ipc;
 #[cfg(target_os = "linux")]
 mod portal_hotkeys;
 mod protocol;
+#[cfg(windows)]
+mod win32;
 #[cfg(target_os = "linux")]
 mod x11_activation;
 
@@ -26,10 +28,10 @@ use protocol::{
     UiAction,
 };
 use screenrecorder_adapters::{
-    AudioDevice, AudioDeviceKind, AudioProbe, DownloadProgress, ExportRequest, LinuxAudioRecorder,
-    ModelManager, PORTAL_CANCELLED, Paths, PortalSource, Region, WaylandPortalRecorder, WindowInfo,
-    X11VideoRecorder, analyze_track, list_windows, merge_audio, merge_recording, read_levels,
-    recover_all_segments, take_screenshot,
+    AudioDevice, AudioDeviceKind, AudioProbe, AudioRecorder, DownloadProgress, ExportRequest,
+    ModelManager, PORTAL_CANCELLED, Paths, PortalSource, Region, VideoRecorder,
+    WaylandPortalRecorder, WindowInfo, analyze_track, list_windows, merge_audio, merge_recording,
+    read_levels, recover_all_segments, resolve_models_root, take_screenshot,
 };
 use screenrecorder_application::{
     DiarizeWorker, HistoryStore, JobRecord, ManifestState, MlWorker, NemoWorker, Rect,
@@ -40,7 +42,9 @@ use screenrecorder_application::{
 use screenrecorder_domain::{SessionId, TrackKind, TrackStats, TrackStatus};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+#[cfg(target_os = "linux")]
+use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 use tray_icon::{
     TrayIcon, TrayIconBuilder,
@@ -181,12 +185,12 @@ pub struct ScreenRecorderApp {
     output_format: String,
     video_quality: String,
     audio_track_mode: String,
-    recorder: X11VideoRecorder,
+    recorder: VideoRecorder,
     wayland_recorder: WaylandPortalRecorder,
     using_wayland: bool,
     wayland_pending: bool,
     wayland_started_at: Option<Instant>,
-    audio_recorder: LinuxAudioRecorder,
+    audio_recorder: AudioRecorder,
     recording: bool,
     recording_started_at: Option<Instant>,
     session_dir: Option<PathBuf>,
@@ -194,6 +198,7 @@ pub struct ScreenRecorderApp {
     model_manager: ModelManager,
     download_rx: Option<Receiver<DownloadEvent>>,
     download_model: Option<&'static str>,
+    pending_model_download: Option<&'static str>,
     download_progress: f32,
     folder_rx: Option<Receiver<Option<PathBuf>>>,
     folder_target: Option<FolderTarget>,
@@ -292,13 +297,8 @@ impl ScreenRecorderApp {
         backend: UiBackend,
     ) -> Self {
         let daemon = client.is_none();
-        let models_root = if settings.models_dir.trim().is_empty() {
-            paths.models_dir()
-        } else {
-            PathBuf::from(settings.models_dir.trim())
-        };
-        let model_manager = ModelManager::new(models_root);
-        let audio_devices = LinuxAudioRecorder::list_devices().unwrap_or_default();
+        let model_manager = ModelManager::new(models_root_for(&paths, &settings.models_dir));
+        let audio_devices = AudioRecorder::list_devices().unwrap_or_default();
         let recordings = paths.data_dir.join("recordings");
         let recovered = if daemon {
             recover_incomplete(&recordings).unwrap_or_default()
@@ -367,12 +367,12 @@ impl ScreenRecorderApp {
             output_format,
             video_quality,
             audio_track_mode,
-            recorder: X11VideoRecorder::new(),
+            recorder: VideoRecorder::new(),
             wayland_recorder: WaylandPortalRecorder::new(),
             using_wayland: false,
             wayland_pending: false,
             wayland_started_at: None,
-            audio_recorder: LinuxAudioRecorder::new(),
+            audio_recorder: AudioRecorder::new(),
             recording: false,
             recording_started_at: None,
             session_dir: None,
@@ -380,6 +380,7 @@ impl ScreenRecorderApp {
             model_manager,
             download_rx: None,
             download_model: None,
+            pending_model_download: None,
             download_progress: 0.0,
             folder_rx: None,
             folder_target: None,
@@ -652,6 +653,11 @@ impl ScreenRecorderApp {
             }
         }
         self.hotkey_bindings = registered;
+        tracing::info!(
+            registered = self.hotkey_bindings.len(),
+            errors = ?errors,
+            "глобальные горячие клавиши"
+        );
         if !errors.is_empty() {
             self.log = errors.join("; ");
         }
@@ -802,6 +808,7 @@ impl ScreenRecorderApp {
                 .find(|(hotkey, _)| hotkey.id() == event.id)
                 .copied()
             {
+                tracing::info!(?command, "глобальная горячая клавиша");
                 self.execute_tray_command(command);
             }
         }
@@ -1283,6 +1290,7 @@ impl ScreenRecorderApp {
             return;
         };
         let Some(Some(path)) = result else {
+            self.pending_model_download = None;
             self.log = "Выбор каталога отменён.".to_string();
             return;
         };
@@ -1294,12 +1302,16 @@ impl ScreenRecorderApp {
         match target {
             FolderTarget::Models => {
                 self.settings.models_dir = value.clone();
-                self.model_manager = ModelManager::new(&value);
+                let root = models_root_for(&self.paths, &value);
+                self.model_manager = ModelManager::new(&root);
+                self.log = format!("{title}: {value} (модели: {})", root.display());
             }
             FolderTarget::Output => self.settings.output_dir = value.clone(),
         }
         self.settings_dirty = true;
-        self.log = format!("{title}: {value}");
+        if let Some(id) = self.pending_model_download.take() {
+            self.start_download(id);
+        }
     }
 
     /// Сохраняет настройки, если пользователь что-то изменил.
@@ -1315,12 +1327,8 @@ impl ScreenRecorderApp {
             Ok(()) => self.log = "Настройки сохранены автоматически.".to_string(),
             Err(error) => self.status = format!("Ошибка сохранения: {error}"),
         }
-        let root = if self.settings.models_dir.trim().is_empty() {
-            self.paths.models_dir()
-        } else {
-            PathBuf::from(self.settings.models_dir.trim())
-        };
-        self.model_manager = ModelManager::new(root);
+        self.model_manager =
+            ModelManager::new(models_root_for(&self.paths, &self.settings.models_dir));
         self.settings_dirty = false;
         if self.client.is_some() {
             let request = Request::ReloadSettings {
@@ -1355,6 +1363,12 @@ impl ScreenRecorderApp {
     fn start_download(&mut self, id: &'static str) {
         if self.download_rx.is_some() {
             self.log = "Другая модель уже скачивается.".to_string();
+            return;
+        }
+        if self.settings.models_dir.trim().is_empty() {
+            self.pending_model_download = Some(id);
+            self.log = "Выберите папку моделей — после выбора скачивание начнётся.".to_string();
+            self.pick_folder(FolderTarget::Models);
             return;
         }
         let (sender, receiver) = mpsc::channel();
@@ -1445,10 +1459,10 @@ impl ScreenRecorderApp {
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             let mic_handle = std::thread::spawn(move || {
-                LinuxAudioRecorder::probe(mic_target.as_deref(), AudioDeviceKind::Mic)
+                AudioRecorder::probe(mic_target.as_deref(), AudioDeviceKind::Mic)
             });
             let system_handle = std::thread::spawn(move || {
-                LinuxAudioRecorder::probe(system_target.as_deref(), AudioDeviceKind::System)
+                AudioRecorder::probe(system_target.as_deref(), AudioDeviceKind::System)
             });
             let mic = mic_handle
                 .join()
@@ -1596,7 +1610,7 @@ impl ScreenRecorderApp {
             if wayland {
                 "portal-pipewire-gst"
             } else {
-                "ffmpeg-x11grab"
+                video_backend_label()
             },
             None,
         );
@@ -1709,12 +1723,14 @@ impl ScreenRecorderApp {
                     );
                 }
                 if audio.mic {
+                    // WASAPI пишет микрофон в stereo, pw-record — в mono.
+                    let channels = if cfg!(windows) { 2 } else { 1 };
                     self.add_manifest_track(
                         TrackKind::Mic,
                         "mic.wav",
                         mic_device,
                         Some(48_000),
-                        Some(1),
+                        Some(channels),
                         self.audio_offset_ms,
                     );
                 }
@@ -1835,7 +1851,7 @@ impl ScreenRecorderApp {
             if wayland {
                 "portal-pipewire-gst"
             } else {
-                "ffmpeg-x11grab"
+                video_backend_label()
             },
             Some(region),
         );
@@ -2026,9 +2042,8 @@ impl ScreenRecorderApp {
         self.recording_mode = None;
         self.audio_only = false;
         self.status = "Остановка записи…".to_string();
-        let mut audio_recorder =
-            std::mem::replace(&mut self.audio_recorder, LinuxAudioRecorder::new());
-        let mut recorder = std::mem::replace(&mut self.recorder, X11VideoRecorder::new());
+        let mut audio_recorder = std::mem::replace(&mut self.audio_recorder, AudioRecorder::new());
+        let mut recorder = std::mem::replace(&mut self.recorder, VideoRecorder::new());
         let mut wayland_recorder =
             std::mem::replace(&mut self.wayland_recorder, WaylandPortalRecorder::new());
         let (sender, receiver) = mpsc::channel();
@@ -2278,11 +2293,7 @@ impl ScreenRecorderApp {
             self.log = "Распознавание пропущено: нет аудиодорожек.".to_string();
             return;
         }
-        let models_dir = if self.settings.models_dir.trim().is_empty() {
-            self.paths.models_dir()
-        } else {
-            PathBuf::from(self.settings.models_dir.trim())
-        };
+        let models_dir = models_root_for(&self.paths, &self.settings.models_dir);
         let language = self.settings.transcription.language.clone();
         let compute_device = self.settings.transcription.compute_device.clone();
         let diarization_enabled =
@@ -2476,12 +2487,14 @@ impl ScreenRecorderApp {
                     .and_then(|dir| read_progress(&dir.join("progress.json")))
                     .map(|progress| progress.pid)
             });
+        #[cfg(unix)]
         if let Some(pid) = pid.filter(|pid| *pid > 0) {
-            #[cfg(unix)]
             unsafe {
                 libc::kill(pid as i32, libc::SIGTERM);
             }
         }
+        #[cfg(not(unix))]
+        let _ = pid;
         self.cancel_requested = true;
         self.status = "Отмена распознавания…".to_string();
     }
@@ -3018,7 +3031,7 @@ impl ScreenRecorderApp {
             } else {
                 Some(target.as_str())
             };
-            let result = LinuxAudioRecorder::probe(target, kind).map_err(|error| error.to_string());
+            let result = AudioRecorder::probe(target, kind).map_err(|error| error.to_string());
             let _ = sender.send(result);
         });
         self.probe_rx = Some(receiver);
@@ -3062,6 +3075,7 @@ impl ScreenRecorderApp {
         ui: &mut egui::Ui,
         title: &str,
         ready: bool,
+        partial: bool,
         progress: Option<f32>,
         description: &str,
     ) -> Option<ModelAction> {
@@ -3098,8 +3112,15 @@ impl ScreenRecorderApp {
                             .desired_width(110.0)
                             .show_percentage(),
                     );
-                } else if ui.button("Скачать").clicked() {
-                    action = Some(ModelAction::Download);
+                } else {
+                    let label = if partial {
+                        "Докачать"
+                    } else {
+                        "Скачать"
+                    };
+                    if ui.button(label).clicked() {
+                        action = Some(ModelAction::Download);
+                    }
                 }
             });
         });
@@ -3686,6 +3707,10 @@ impl ScreenRecorderApp {
         let vad_ready = self.model_manager.is_downloaded("vad");
         let nemo_ready = self.model_manager.is_downloaded("nemo");
         let nemo_progress = (self.download_model == Some("nemo")).then_some(self.download_progress);
+        let whisper_partial = self.model_manager.is_partial("whisper");
+        let diarization_partial = self.model_manager.is_partial("diarization");
+        let vad_partial = self.model_manager.is_partial("vad");
+        let nemo_partial = self.model_manager.is_partial("nemo");
         let whisper_progress =
             (self.download_model == Some("whisper")).then_some(self.download_progress);
         let diarization_progress =
@@ -3706,6 +3731,7 @@ impl ScreenRecorderApp {
                         ui,
                         "Whisper large-v3-turbo",
                         whisper_ready,
+                        whisper_partial,
                         whisper_progress,
                         &format!("распознавание речи · {whisper_size}"),
                     ) {
@@ -3718,6 +3744,7 @@ impl ScreenRecorderApp {
                         ui,
                         "sherpa-onnx",
                         diarization_ready,
+                        diarization_partial,
                         diarization_progress,
                         &format!("кто говорит · {diarization_size}"),
                     ) {
@@ -3730,6 +3757,7 @@ impl ScreenRecorderApp {
                         ui,
                         "Silero VAD",
                         vad_ready,
+                        vad_partial,
                         vad_progress,
                         &format!("речь и тишина · {vad_size}"),
                     ) {
@@ -3742,6 +3770,7 @@ impl ScreenRecorderApp {
                         ui,
                         "NeMo Sortformer",
                         nemo_ready,
+                        nemo_partial,
                         nemo_progress,
                         &format!("до 8 говорящих · {nemo_size}"),
                     ) {
@@ -3911,6 +3940,15 @@ impl ScreenRecorderApp {
                 if pick_output {
                     self.pick_folder(FolderTarget::Output);
                 }
+                let models_hint = if self.settings.models_dir.trim().is_empty() {
+                    "Папка не выбрана — при скачивании спросим и покажем путь здесь.".to_string()
+                } else {
+                    format!(
+                        "Модели: {}",
+                        models_root_for(&self.paths, &self.settings.models_dir).display()
+                    )
+                };
+                ui.label(RichText::new(models_hint).size(10.0).color(HINT));
 
                 ui.add_space(6.0);
                 let hotkeys = [
@@ -4070,13 +4108,9 @@ impl ScreenRecorderApp {
         self.output_format = self.settings.export.format.clone();
         self.video_quality = self.settings.export.video_quality.clone();
         self.audio_track_mode = self.settings.export.audio_mode.clone();
-        let models_root = if self.settings.models_dir.trim().is_empty() {
-            self.paths.models_dir()
-        } else {
-            PathBuf::from(self.settings.models_dir.trim())
-        };
-        self.model_manager = ModelManager::new(models_root);
-        self.audio_devices = LinuxAudioRecorder::list_devices().unwrap_or_default();
+        self.model_manager =
+            ModelManager::new(models_root_for(&self.paths, &self.settings.models_dir));
+        self.audio_devices = AudioRecorder::list_devices().unwrap_or_default();
         if self.hotkey_manager.is_some() {
             self.apply_hotkeys();
         }
@@ -4349,6 +4383,18 @@ fn process_rss_mb() -> Option<u64> {
         }
     }
     None
+}
+
+/// Имя видеобэкенда для манифеста и журнала.
+fn video_backend_label() -> &'static str {
+    #[cfg(windows)]
+    {
+        "ffmpeg-gdigrab"
+    }
+    #[cfg(not(windows))]
+    {
+        "ffmpeg-x11grab"
+    }
 }
 
 /// Проверяет, что приложение работает через Wayland.
@@ -4629,6 +4675,11 @@ fn microphone_gain_db(session_dir: &Path) -> f32 {
     }
 }
 
+/// Фактический корень моделей с учётом выбранной папки.
+fn models_root_for(paths: &Paths, setting: &str) -> PathBuf {
+    resolve_models_root(setting, &paths.models_dir())
+}
+
 /// Форматирует размер файла в мегабайтах.
 fn format_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 {
@@ -4687,8 +4738,26 @@ fn copy_transcripts_next_to_video(
 
 /// Открывает файл или каталог системным обработчиком.
 fn open_path(path: &str) {
-    let _ = Command::new("xdg-open")
-        .arg(path)
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+    #[cfg(windows)]
+    let mut command = {
+        // Пустой заголовок обязателен: иначе `start` примет путь за него.
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", path]);
+        command
+    };
+    #[cfg(not(any(target_os = "linux", windows)))]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(path);
+        command
+    };
+    let _ = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -4990,6 +5059,7 @@ pub fn run(paths: Paths, settings: Settings) -> Result<(), String> {
     let backend = preferred_ui_backend();
     tracing::info!(?backend, "бэкенд окна");
     let client = ipc::ensure_daemon(&paths)?;
+    #[cfg_attr(windows, allow(unused_mut))]
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([380.0, 660.0])
