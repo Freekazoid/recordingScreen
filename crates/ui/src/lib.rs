@@ -44,6 +44,10 @@ use tray_icon::{
     TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuId, MenuItem, accelerator::Accelerator},
 };
+#[cfg(target_os = "linux")]
+use winit::platform::wayland::EventLoopBuilderExtWayland;
+#[cfg(target_os = "linux")]
+use winit::platform::x11::EventLoopBuilderExtX11;
 
 /// Результат фоновой загрузки модели.
 enum DownloadEvent {
@@ -139,6 +143,20 @@ enum Screen {
     History,
     Settings,
     About,
+}
+
+/// Графический бэкенд окна.
+///
+/// На Wayland winit может навсегда перестать присылать `RedrawRequested`,
+/// если compositor задержал frame callback (окно было закрыто другим окном
+/// или потерялось событие драйвера). Тогда процесс жив, сервис отвечает,
+/// но окно не перерисовывается и не реагирует на клики. Для панели
+/// управления это критичнее нативности, поэтому по умолчанию выбираем X11
+/// через XWayland; Wayland можно включить принудительно.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiBackend {
+    X11,
+    Wayland,
 }
 
 /// Главное окно приложения.
@@ -4370,18 +4388,73 @@ fn configure_style(ctx: &egui::Context) {
     });
 }
 
+/// Выбирает бэкенд окна с учётом доступных графических серверов.
+///
+/// По умолчанию на Linux предпочитается X11, если задан `DISPLAY`:
+/// XWayland не зависит от frame callback'ов Wayland и окно не «залипает».
+/// Принудительный выбор: `SCREENRECORDER_UI_BACKEND=wayland|x11`.
+fn preferred_ui_backend() -> UiBackend {
+    let requested = std::env::var("SCREENRECORDER_UI_BACKEND")
+        .unwrap_or_default()
+        .to_lowercase();
+    match requested.as_str() {
+        "wayland" => UiBackend::Wayland,
+        "x11" => UiBackend::X11,
+        _ if x11_socket_available() => UiBackend::X11,
+        _ => UiBackend::Wayland,
+    }
+}
+
+/// Проверяет, что локальный X-сервер (или XWayland) доступен.
+///
+/// Одного `DISPLAY` недостаточно: переменная может остаться от старой
+/// сессии, а сокета уже нет. Удалённые дисплеи не проверяем — пусть
+/// подключение выполняет winit.
+fn x11_socket_available() -> bool {
+    let Some(display) = std::env::var_os("DISPLAY") else {
+        return false;
+    };
+    let display = display.to_string_lossy();
+    let Some((host, rest)) = display.split_once(':') else {
+        return false;
+    };
+    if !host.is_empty() {
+        return true;
+    }
+    let number = rest.split('.').next().unwrap_or_default();
+    if number.is_empty() {
+        return false;
+    }
+    Path::new(&format!("/tmp/.X11-unix/X{number}")).exists()
+}
+
 /// Запускает окно интерфейса, подключённое к фоновому сервису.
 pub fn run(paths: Paths, settings: Settings) -> Result<(), String> {
     tracing::info!("подключение окна к сервису");
+    let backend = preferred_ui_backend();
+    tracing::info!(?backend, "бэкенд окна");
     let client = ipc::ensure_daemon(&paths)?;
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([380.0, 660.0])
             .with_min_inner_size([380.0, 600.0])
             .with_resizable(false)
+            .with_taskbar(false)
             .with_title("Рекордер экрана"),
         ..Default::default()
     };
+    #[cfg(target_os = "linux")]
+    {
+        type Builder = winit::event_loop::EventLoopBuilder<eframe::UserEvent>;
+        options.event_loop_builder = Some(match backend {
+            UiBackend::X11 => Box::new(|builder: &mut Builder| {
+                builder.with_x11();
+            }),
+            UiBackend::Wayland => Box::new(|builder: &mut Builder| {
+                builder.with_wayland();
+            }),
+        });
+    }
 
     eframe::run_native(
         "Рекордер экрана",
