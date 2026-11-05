@@ -40,6 +40,7 @@ use screenrecorder_application::{
     recover_incomplete, save_manifest,
 };
 use screenrecorder_domain::{SessionId, TrackKind, TrackStats, TrackStatus};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "linux")]
@@ -59,6 +60,13 @@ use winit::platform::x11::EventLoopBuilderExtX11;
 enum DownloadEvent {
     Progress(DownloadProgress),
     Finished(Result<(), String>),
+}
+
+/// Одна параллельная загрузка модели.
+struct DownloadJob {
+    id: &'static str,
+    rx: Receiver<DownloadEvent>,
+    progress: f32,
 }
 
 /// Прогресс ML-воркера.
@@ -196,10 +204,8 @@ pub struct ScreenRecorderApp {
     session_dir: Option<PathBuf>,
     last_export_path: Option<PathBuf>,
     model_manager: ModelManager,
-    download_rx: Option<Receiver<DownloadEvent>>,
-    download_model: Option<&'static str>,
-    pending_model_download: Option<&'static str>,
-    download_progress: f32,
+    downloads: Vec<DownloadJob>,
+    pending_model_download: VecDeque<&'static str>,
     folder_rx: Option<Receiver<Option<PathBuf>>>,
     folder_target: Option<FolderTarget>,
     settings_dirty: bool,
@@ -378,10 +384,8 @@ impl ScreenRecorderApp {
             session_dir: None,
             last_export_path: None,
             model_manager,
-            download_rx: None,
-            download_model: None,
-            pending_model_download: None,
-            download_progress: 0.0,
+            downloads: Vec::new(),
+            pending_model_download: VecDeque::new(),
             folder_rx: None,
             folder_target: None,
             settings_dirty: false,
@@ -1286,8 +1290,13 @@ impl ScreenRecorderApp {
             return;
         };
         let Some(Some(path)) = result else {
-            self.pending_model_download = None;
-            self.log = "Выбор каталога отменён.".to_string();
+            let dropped = self.pending_model_download.len();
+            self.pending_model_download.clear();
+            self.log = if dropped > 0 {
+                format!("Выбор каталога отменён; снято с очереди: {dropped}.")
+            } else {
+                "Выбор каталога отменён.".to_string()
+            };
             return;
         };
         let value = path.to_string_lossy().to_string();
@@ -1305,8 +1314,11 @@ impl ScreenRecorderApp {
             FolderTarget::Output => self.settings.output_dir = value.clone(),
         }
         self.settings_dirty = true;
-        if let Some(id) = self.pending_model_download.take() {
-            self.start_download(id);
+        if matches!(target, FolderTarget::Models) {
+            let pending: Vec<&'static str> = self.pending_model_download.drain(..).collect();
+            for id in pending {
+                self.start_download(id);
+            }
         }
     }
 
@@ -1355,22 +1367,45 @@ impl ScreenRecorderApp {
         }
     }
 
-    /// Запускает скачивание модели в фоне.
-    fn start_download(&mut self, id: &'static str) {
-        if self.download_rx.is_some() {
-            self.log = "Другая модель уже скачивается.".to_string();
+    /// Запускает скачивание модели, не дожидаясь других.
+    ///
+    /// Каждая модель качается в своём потоке: пользователь может нажать
+    /// несколько кнопок подряд, и все загрузки идут параллельно.
+    fn request_download(&mut self, id: &'static str) {
+        if self.downloads.iter().any(|job| job.id == id)
+            || self.pending_model_download.contains(&id)
+        {
             return;
         }
         let models_dir = self.settings.models_dir.trim();
         if models_dir.is_empty() || !Path::new(models_dir).is_dir() {
-            if !models_dir.is_empty() {
-                self.log =
-                    format!("Папка моделей не найдена: {models_dir}. Выберите существующую папку.");
+            self.pending_model_download.push_back(id);
+            if self.folder_rx.is_none() {
+                if models_dir.is_empty() {
+                    self.log =
+                        "Выберите папку моделей — после выбора загрузки начнутся.".to_string();
+                } else {
+                    self.log = format!(
+                        "Папка моделей не найдена: {models_dir}. Выберите существующую папку."
+                    );
+                }
+                self.pick_folder(FolderTarget::Models);
             } else {
-                self.log = "Выберите папку моделей — после выбора скачивание начнётся.".to_string();
+                self.log = format!(
+                    "Модель {id} ждёт выбора папки (в ожидании: {}).",
+                    self.pending_model_download.len()
+                );
             }
-            self.pending_model_download = Some(id);
-            self.pick_folder(FolderTarget::Models);
+            return;
+        }
+        self.start_download(id);
+    }
+
+    /// Запускает один поток скачивания модели.
+    fn start_download(&mut self, id: &'static str) {
+        let models_dir = self.settings.models_dir.trim();
+        if models_dir.is_empty() || !Path::new(models_dir).is_dir() {
+            self.request_download(id);
             return;
         }
         let (sender, receiver) = mpsc::channel();
@@ -1388,48 +1423,59 @@ impl ScreenRecorderApp {
                 result.map_err(|error| error.to_string()),
             ));
         });
-        self.download_rx = Some(receiver);
-        self.download_model = Some(id);
-        self.download_progress = 0.0;
+        self.downloads.push(DownloadJob {
+            id,
+            rx: receiver,
+            progress: 0.0,
+        });
         self.status = format!("Скачивание модели: {id}");
         self.log = format!("Начато скачивание модели {id}.");
     }
 
-    /// Обрабатывает события фоновой загрузки.
+    /// Возвращает прогресс конкретной модели, если она качается.
+    fn download_percent(&self, id: &str) -> Option<f32> {
+        self.downloads
+            .iter()
+            .find(|job| job.id == id)
+            .map(|job| job.progress)
+    }
+
+    /// Обрабатывает события всех параллельных загрузок.
     fn poll_download(&mut self) {
-        let events: Vec<DownloadEvent> = match &self.download_rx {
-            Some(receiver) => std::iter::from_fn(|| receiver.try_recv().ok()).collect(),
-            None => return,
-        };
-        for event in events {
+        let mut events: Vec<(&'static str, DownloadEvent)> = Vec::new();
+        for job in &self.downloads {
+            while let Ok(event) = job.rx.try_recv() {
+                events.push((job.id, event));
+            }
+        }
+        for (id, event) in events {
             match event {
                 DownloadEvent::Progress(progress) => {
-                    self.download_progress = progress.percent;
+                    if let Some(job) = self.downloads.iter_mut().find(|job| job.id == id) {
+                        job.progress = progress.percent;
+                    }
                     self.status = format!(
                         "Скачивание: {} · {:.1}%",
                         progress.model_id, progress.percent
                     );
                 }
                 DownloadEvent::Finished(Ok(())) => {
-                    self.status = if self.model_manager.is_downloaded("whisper") {
-                        "Готово к записи".to_string()
-                    } else {
-                        "Модель скачана".to_string()
-                    };
-                    self.log = "Загрузка модели завершена.".to_string();
+                    self.downloads.retain(|job| job.id != id);
+                    self.log = format!("Модель {id} скачана.");
                     self.notify_service_settings();
-                    self.download_rx = None;
-                    self.download_model = None;
-                    self.download_progress = 0.0;
                 }
                 DownloadEvent::Finished(Err(error)) => {
-                    self.status = format!("Ошибка загрузки: {error}");
-                    self.log = format!("Не удалось скачать модель: {error}");
-                    self.download_rx = None;
-                    self.download_model = None;
-                    self.download_progress = 0.0;
+                    self.downloads.retain(|job| job.id != id);
+                    self.log = format!("Не удалось скачать модель {id}: {error}");
                 }
             }
+        }
+        if self.downloads.is_empty() {
+            self.status = if self.model_manager.is_downloaded("whisper") {
+                "Готово к записи".to_string()
+            } else {
+                "Модели не скачаны".to_string()
+            };
         }
     }
 
@@ -3078,6 +3124,7 @@ impl ScreenRecorderApp {
         title: &str,
         ready: bool,
         partial: bool,
+        queued: bool,
         progress: Option<f32>,
         description: &str,
     ) -> Option<ModelAction> {
@@ -3108,6 +3155,8 @@ impl ScreenRecorderApp {
                     if ui.button("Удалить").clicked() {
                         action = Some(ModelAction::Delete);
                     }
+                } else if queued {
+                    ui.label(RichText::new("Ждёт папки").color(HINT));
                 } else if let Some(percent) = progress {
                     ui.add(
                         egui::ProgressBar::new((percent / 100.0).clamp(0.0, 1.0))
@@ -3708,16 +3757,18 @@ impl ScreenRecorderApp {
         let diarization_ready = self.model_manager.is_downloaded("diarization");
         let vad_ready = self.model_manager.is_downloaded("vad");
         let nemo_ready = self.model_manager.is_downloaded("nemo");
-        let nemo_progress = (self.download_model == Some("nemo")).then_some(self.download_progress);
         let whisper_partial = self.model_manager.is_partial("whisper");
         let diarization_partial = self.model_manager.is_partial("diarization");
         let vad_partial = self.model_manager.is_partial("vad");
         let nemo_partial = self.model_manager.is_partial("nemo");
-        let whisper_progress =
-            (self.download_model == Some("whisper")).then_some(self.download_progress);
-        let diarization_progress =
-            (self.download_model == Some("diarization")).then_some(self.download_progress);
-        let vad_progress = (self.download_model == Some("vad")).then_some(self.download_progress);
+        let whisper_waiting = self.pending_model_download.contains(&"whisper");
+        let diarization_waiting = self.pending_model_download.contains(&"diarization");
+        let vad_waiting = self.pending_model_download.contains(&"vad");
+        let nemo_waiting = self.pending_model_download.contains(&"nemo");
+        let whisper_progress = self.download_percent("whisper");
+        let diarization_progress = self.download_percent("diarization");
+        let vad_progress = self.download_percent("vad");
+        let nemo_progress = self.download_percent("nemo");
         let whisper_size = format_size(self.model_manager.size("whisper"));
         let diarization_size = format_size(self.model_manager.size("diarization"));
         let vad_size = format_size(self.model_manager.size("vad"));
@@ -3734,6 +3785,7 @@ impl ScreenRecorderApp {
                         "Whisper large-v3-turbo",
                         whisper_ready,
                         whisper_partial,
+                        whisper_waiting,
                         whisper_progress,
                         &format!("распознавание речи · {whisper_size}"),
                     ) {
@@ -3747,6 +3799,7 @@ impl ScreenRecorderApp {
                         "sherpa-onnx",
                         diarization_ready,
                         diarization_partial,
+                        diarization_waiting,
                         diarization_progress,
                         &format!("кто говорит · {diarization_size}"),
                     ) {
@@ -3760,6 +3813,7 @@ impl ScreenRecorderApp {
                         "Silero VAD",
                         vad_ready,
                         vad_partial,
+                        vad_waiting,
                         vad_progress,
                         &format!("речь и тишина · {vad_size}"),
                     ) {
@@ -3773,6 +3827,7 @@ impl ScreenRecorderApp {
                         "NeMo Sortformer",
                         nemo_ready,
                         nemo_partial,
+                        nemo_waiting,
                         nemo_progress,
                         &format!("до 8 говорящих · {nemo_size}"),
                     ) {
@@ -3788,7 +3843,7 @@ impl ScreenRecorderApp {
                     }
                 });
                 if let Some(id) = requested {
-                    self.start_download(id);
+                    self.request_download(id);
                 }
                 if let Some(id) = delete_requested {
                     self.delete_model(id);
