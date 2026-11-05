@@ -54,6 +54,12 @@ tail -f ~/.local/share/screenrecorder/logs/app.log
 минуту. `daemon.log` остаётся для stderr/аварийных сообщений. Путь к логу
 показывает `screenrecorder --diagnose`.
 
+Собрать логи, диагностику, `ps`, `wpctl` и `xrandr` одним архивом:
+
+```bash
+./scripts/collect-logs.sh
+```
+
 ### Настройки 3.x
 
 При первом запуске v4, если файла v4 ещё нет, приложение ищет
