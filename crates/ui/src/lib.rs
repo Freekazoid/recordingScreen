@@ -187,6 +187,7 @@ pub struct ScreenRecorderApp {
     folder_target: Option<FolderTarget>,
     settings_dirty: bool,
     client: Option<ipc::Client>,
+    ui_backend: UiBackend,
     last_daemon_poll: Instant,
     last_history_refresh: Instant,
     last_state_log: Instant,
@@ -245,20 +246,30 @@ pub struct ScreenRecorderApp {
 
 impl ScreenRecorderApp {
     /// Создаёт окно, подключённое к фоновому сервису.
-    pub fn new_ui(paths: Paths, settings: Settings, client: ipc::Client) -> Self {
-        Self::build(paths, settings, Some(client))
+    pub(crate) fn new_ui(
+        paths: Paths,
+        settings: Settings,
+        client: ipc::Client,
+        backend: UiBackend,
+    ) -> Self {
+        Self::build(paths, settings, Some(client), backend)
     }
 
     /// Создаёт фоновый сервис без окна.
     pub(crate) fn new_daemon(paths: Paths, settings: Settings) -> Self {
-        Self::build(paths, settings, None)
+        Self::build(paths, settings, None, UiBackend::X11)
     }
 
     /// Общая инициализация окна и сервиса.
     ///
     /// Сервис владеет записью, очередью, историей и треем. Окно только
     /// читает снимок состояния и отправляет команды.
-    fn build(paths: Paths, settings: Settings, client: Option<ipc::Client>) -> Self {
+    fn build(
+        paths: Paths,
+        settings: Settings,
+        client: Option<ipc::Client>,
+        backend: UiBackend,
+    ) -> Self {
         let daemon = client.is_none();
         let models_root = if settings.models_dir.trim().is_empty() {
             paths.models_dir()
@@ -353,6 +364,7 @@ impl ScreenRecorderApp {
             folder_target: None,
             settings_dirty: false,
             client,
+            ui_backend: backend,
             last_daemon_poll: Instant::now(),
             last_history_refresh: Instant::now(),
             last_state_log: Instant::now(),
@@ -3902,7 +3914,7 @@ impl ScreenRecorderApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    if is_wayland() {
+                    if self.ui_backend == UiBackend::Wayland {
                         ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                             egui::UserAttentionType::Critical,
                         ));
@@ -4492,7 +4504,9 @@ pub fn run(paths: Paths, settings: Settings) -> Result<(), String> {
         Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
             configure_style(&cc.egui_ctx);
-            Ok(Box::new(ScreenRecorderApp::new_ui(paths, settings, client)))
+            Ok(Box::new(ScreenRecorderApp::new_ui(
+                paths, settings, client, backend,
+            )))
         }),
     )
     .map_err(|error| error.to_string())
