@@ -1443,6 +1443,7 @@ impl ScreenRecorderApp {
     /// Обрабатывает события всех параллельных загрузок.
     fn poll_download(&mut self) {
         let mut events: Vec<(&'static str, DownloadEvent)> = Vec::new();
+        let mut finished_any = false;
         for job in &self.downloads {
             while let Ok(event) = job.rx.try_recv() {
                 events.push((job.id, event));
@@ -1463,14 +1464,21 @@ impl ScreenRecorderApp {
                     self.downloads.retain(|job| job.id != id);
                     self.log = format!("Модель {id} скачана.");
                     self.notify_service_settings();
+                    finished_any = true;
                 }
                 DownloadEvent::Finished(Err(error)) => {
                     self.downloads.retain(|job| job.id != id);
                     self.log = format!("Не удалось скачать модель {id}: {error}");
+                    finished_any = true;
                 }
             }
         }
-        if self.downloads.is_empty() {
+        if finished_any
+            && self.downloads.is_empty()
+            && !self.recording
+            && !self.transcribing
+            && !self.exporting
+        {
             self.status = if self.model_manager.is_downloaded("whisper") {
                 "Готово к записи".to_string()
             } else {
