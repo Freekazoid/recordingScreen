@@ -628,7 +628,10 @@ impl ScreenRecorderApp {
         self.show_requested = true;
         tracing::info!("запуск окна из трея");
         if let Err(error) = self.spawn_ui() {
+            tracing::error!(%error, "не удалось открыть окно из трея");
             self.log = format!("Не удалось открыть окно: {error}");
+            self.show_requested = false;
+            self.ui_launching_until = None;
         }
     }
 
@@ -644,14 +647,15 @@ impl ScreenRecorderApp {
 
     /// Запускает отдельный процесс окна.
     fn spawn_ui(&self) -> Result<(), String> {
-        let exe = std::env::current_exe().map_err(|error| format!("исполняемый файл: {error}"))?;
-        let mut child = Command::new(exe)
+        let exe = ui_executable()?;
+        let mut child = Command::new(&exe)
             .arg("--ui")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .map_err(|error| format!("запуск окна: {error}"))?;
+            .map_err(|error| format!("запуск окна {}: {error}", exe.display()))?;
+        tracing::info!(path = %exe.display(), "процесс окна запущен");
         // Окно — отдельный процесс; обязательно пожинаем его, иначе
         // после закрытия остаётся зомби.
         std::thread::spawn(move || {
@@ -4031,6 +4035,27 @@ fn is_wayland() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
+/// Убирает суффикс ` (deleted)` из пути к исполняемому файлу.
+///
+/// Linux добавляет его в `/proc/self/exe`, если бинарник пересобрали или
+/// заменили при работающем процессе. Запускать такой путь нельзя, поэтому
+/// сервис должен использовать актуальный файл без суффикса.
+fn clean_executable_path(raw: &str) -> &str {
+    raw.strip_suffix(" (deleted)").unwrap_or(raw)
+}
+
+/// Возвращает существующий путь к исполняемому файлу приложения.
+fn ui_executable() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|error| format!("исполняемый файл: {error}"))?;
+    let raw = exe.to_string_lossy();
+    let path = PathBuf::from(clean_executable_path(&raw));
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(format!("исполняемый файл не найден: {}", path.display()))
+    }
+}
+
 /// Переводит название режима из снимка в статическую строку.
 fn recording_mode_static(mode: &str) -> Option<&'static str> {
     match mode {
@@ -4522,6 +4547,19 @@ mod tests {
         assert_eq!(select_ui_backend(None, false), UiBackend::Wayland);
         assert_eq!(select_ui_backend(Some("wayland"), true), UiBackend::Wayland);
         assert_eq!(select_ui_backend(Some("x11"), false), UiBackend::X11);
+    }
+
+    /// Проверяет очистку пути после пересборки работающего бинарника.
+    #[test]
+    fn strips_deleted_executable_suffix() {
+        assert_eq!(
+            clean_executable_path("/var/www/recordingscreen/target/debug/screenrecorder (deleted)"),
+            "/var/www/recordingscreen/target/debug/screenrecorder"
+        );
+        assert_eq!(
+            clean_executable_path("/var/www/recordingscreen/target/debug/screenrecorder"),
+            "/var/www/recordingscreen/target/debug/screenrecorder"
+        );
     }
 
     /// Проверяет общий прогресс двух проходов ASR и диаризации.
