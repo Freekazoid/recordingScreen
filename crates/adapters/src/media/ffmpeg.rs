@@ -363,6 +363,10 @@ mod tests {
         assert!(args.contains(&"-itsoffset".to_string()));
         assert!(args.iter().any(|arg| arg.contains("amix=inputs=2")));
         assert!(args.iter().any(|arg| arg.contains("dynaudnorm")));
+        assert!(
+            args.iter().filter(|arg| *arg == "-threads").count() >= 2,
+            "экспорт должен ограничивать потоки"
+        );
         assert!(args.contains(&"aac".to_string()));
         assert_eq!(args.last(), Some(&"/tmp/out.mp4".to_string()));
     }
