@@ -4394,13 +4394,18 @@ fn configure_style(ctx: &egui::Context) {
 /// XWayland не зависит от frame callback'ов Wayland и окно не «залипает».
 /// Принудительный выбор: `SCREENRECORDER_UI_BACKEND=wayland|x11`.
 fn preferred_ui_backend() -> UiBackend {
-    let requested = std::env::var("SCREENRECORDER_UI_BACKEND")
-        .unwrap_or_default()
-        .to_lowercase();
-    match requested.as_str() {
+    let requested = std::env::var("SCREENRECORDER_UI_BACKEND").ok();
+    select_ui_backend(requested.as_deref(), x11_socket_available())
+}
+
+/// Применяет правило выбора бэкенда к уже прочитанным значениям.
+///
+/// Вынесено отдельно, чтобы проверить приоритеты без изменения окружения.
+fn select_ui_backend(requested: Option<&str>, x11_available: bool) -> UiBackend {
+    match requested.unwrap_or_default().to_lowercase().as_str() {
         "wayland" => UiBackend::Wayland,
         "x11" => UiBackend::X11,
-        _ if x11_socket_available() => UiBackend::X11,
+        _ if x11_available => UiBackend::X11,
         _ => UiBackend::Wayland,
     }
 }
@@ -4508,6 +4513,15 @@ mod tests {
         let text = format_markdown(&sample());
         assert!(text.starts_with("# Транскрипт"));
         assert!(text.contains("**спикер_1** привет"));
+    }
+
+    /// Проверяет приоритет X11 и запасной Wayland.
+    #[test]
+    fn chooses_ui_backend() {
+        assert_eq!(select_ui_backend(None, true), UiBackend::X11);
+        assert_eq!(select_ui_backend(None, false), UiBackend::Wayland);
+        assert_eq!(select_ui_backend(Some("wayland"), true), UiBackend::Wayland);
+        assert_eq!(select_ui_backend(Some("x11"), false), UiBackend::X11);
     }
 
     /// Проверяет общий прогресс двух проходов ASR и диаризации.
