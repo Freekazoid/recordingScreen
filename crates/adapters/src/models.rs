@@ -189,7 +189,7 @@ impl ModelManager {
         spec.files.iter().all(|file| {
             let path = self.file_path(spec, file);
             fs::metadata(path)
-                .map(|metadata| metadata.len() > 0)
+                .map(|metadata| metadata.len() == file.size)
                 .unwrap_or(false)
         })
     }
@@ -430,7 +430,8 @@ mod tests {
         let spec = ModelManager::spec("vad").expect("vad");
         let path = manager.file_path(spec, &spec.files[0]);
         fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        fs::write(&path, b"test").expect("write");
+        let file = fs::File::create(&path).expect("create");
+        file.set_len(spec.files[0].size).expect("size");
         assert!(manager.is_downloaded("vad"));
     }
 
@@ -519,7 +520,15 @@ mod models_dir_tests {
         assert_eq!(root, temp.path().join("model"));
     }
 
-    /// Проверяет, что недокачанная модель распознаётся как частичная.
+    /// Создаёт файл нужного размера (разреженный), не занимая диск.
+    fn touch_sized(root: &Path, relative: &str, size: u64) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("каталог");
+        let file = std::fs::File::create(&path).expect("файл");
+        file.set_len(size).expect("размер");
+    }
+
+    /// Проверяет, что недокачанная и неверная по размеру модель не считается готовой.
     #[test]
     fn detects_partial_model() {
         let temp = tempfile::tempdir().expect("temp");
@@ -528,9 +537,15 @@ mod models_dir_tests {
         touch(temp.path(), "diarization/segmentation.onnx");
         assert!(manager.is_partial("diarization"));
         assert!(!manager.is_downloaded("diarization"));
-        touch(temp.path(), "diarization/embedding.onnx");
+
+        touch_sized(temp.path(), "diarization/segmentation.onnx", 5_992_913);
+        touch_sized(temp.path(), "diarization/embedding.onnx", 39_593_761);
         assert!(manager.is_downloaded("diarization"));
         assert!(!manager.is_partial("diarization"));
+
+        touch_sized(temp.path(), "diarization/embedding.onnx", 1);
+        assert!(!manager.is_downloaded("diarization"));
+        assert!(manager.is_partial("diarization"));
     }
 
     /// Пустая настройка ведёт в каталог по умолчанию.
