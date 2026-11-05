@@ -170,6 +170,59 @@ impl Default for UiSettings {
     }
 }
 
+/// Пользовательские сочетания глобальных команд.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HotkeySettings {
+    #[serde(default = "default_hotkey_fullscreen")]
+    pub fullscreen: String,
+    #[serde(default = "default_hotkey_area")]
+    pub area: String,
+    #[serde(default = "default_hotkey_program")]
+    pub program: String,
+    #[serde(default = "default_hotkey_audio_only")]
+    pub audio_only: String,
+    #[serde(default = "default_hotkey_stop")]
+    pub stop: String,
+}
+
+impl Default for HotkeySettings {
+    /// Возвращает сочетания по умолчанию.
+    fn default() -> Self {
+        Self {
+            fullscreen: default_hotkey_fullscreen(),
+            area: default_hotkey_area(),
+            program: default_hotkey_program(),
+            audio_only: default_hotkey_audio_only(),
+            stop: default_hotkey_stop(),
+        }
+    }
+}
+
+/// Сочетание «весь экран» по умолчанию.
+fn default_hotkey_fullscreen() -> String {
+    "Ctrl+Shift+1".to_string()
+}
+
+/// Сочетание «область экрана» по умолчанию.
+fn default_hotkey_area() -> String {
+    "Ctrl+Shift+2".to_string()
+}
+
+/// Сочетание «программа» по умолчанию.
+fn default_hotkey_program() -> String {
+    "Ctrl+Shift+3".to_string()
+}
+
+/// Сочетание «только аудио» по умолчанию.
+fn default_hotkey_audio_only() -> String {
+    "Ctrl+Shift+4".to_string()
+}
+
+/// Сочетание «остановить запись» по умолчанию.
+fn default_hotkey_stop() -> String {
+    "Ctrl+Shift+5".to_string()
+}
+
 /// Полные настройки приложения.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
@@ -193,6 +246,8 @@ pub struct Settings {
     pub privacy: PrivacySettings,
     #[serde(default)]
     pub ui: UiSettings,
+    #[serde(default)]
+    pub hotkeys: HotkeySettings,
 }
 
 /// Возвращает текущую версию схемы для serde-дефолта.
@@ -226,6 +281,7 @@ impl Settings {
             diarization: DiarizationSettings::default(),
             privacy: PrivacySettings::default(),
             ui: UiSettings::default(),
+            hotkeys: HotkeySettings::default(),
         }
     }
 

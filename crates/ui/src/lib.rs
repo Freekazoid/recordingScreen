@@ -20,10 +20,7 @@ use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke,
     TextStyle, Vec2,
 };
-use global_hotkey::{
-    GlobalHotKeyEvent, GlobalHotKeyManager,
-    hotkey::{Code, HotKey, Modifiers},
-};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, hotkey::HotKey};
 use protocol::{
     HotkeyAction, ProgressDto, RecordMode, RegionDto, Request, Response, Snapshot, StartRequest,
     UiAction,
@@ -88,6 +85,16 @@ struct TranscriptOutput {
     segments: usize,
     language: String,
     warning: Option<String>,
+}
+
+/// Редактируемое поле глобального сочетания.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotkeyField {
+    FullScreen,
+    Area,
+    Program,
+    AudioOnly,
+    Stop,
 }
 
 /// Действие из трея или горячей клавиши.
@@ -247,7 +254,8 @@ pub struct ScreenRecorderApp {
     tray_recording_state: Option<bool>,
     last_tray_command: Option<(TrayCommand, Instant)>,
     hotkey_manager: Option<GlobalHotKeyManager>,
-    hotkey_bindings: Vec<(u32, TrayCommand)>,
+    hotkey_bindings: Vec<(HotKey, TrayCommand)>,
+    hotkey_edit: Option<HotkeyField>,
     #[cfg(target_os = "linux")]
     portal_hotkeys_rx: Option<Receiver<portal_hotkeys::PortalHotkeyEvent>>,
     #[cfg(target_os = "linux")]
@@ -432,6 +440,7 @@ impl ScreenRecorderApp {
             last_tray_command: None,
             hotkey_manager: None,
             hotkey_bindings: Vec::new(),
+            hotkey_edit: None,
             #[cfg(target_os = "linux")]
             portal_hotkeys_rx: None,
             #[cfg(target_os = "linux")]
@@ -484,33 +493,35 @@ impl ScreenRecorderApp {
             }
         };
         let menu = Menu::new();
-        let modifier = Modifiers::CONTROL | Modifiers::SHIFT;
-        let accelerator = |code| Some(Accelerator::new(modifier, code));
+        let hotkeys = self.settings.hotkeys.clone();
+        let accelerator = |combo: &str| {
+            parse_hotkey(combo).map(|hotkey| Accelerator::new(hotkey.mods, hotkey.key))
+        };
         let status = MenuItem::new("Статус: готово", false, None);
         let full = MenuItem::new(
-            tray_label("Весь экран", "Ctrl+Shift+1"),
+            tray_label("Весь экран", &hotkeys.fullscreen),
             true,
-            accelerator(Code::Digit1),
+            accelerator(&hotkeys.fullscreen),
         );
         let area = MenuItem::new(
-            tray_label("Область экрана", "Ctrl+Shift+2"),
+            tray_label("Область экрана", &hotkeys.area),
             true,
-            accelerator(Code::Digit2),
+            accelerator(&hotkeys.area),
         );
         let program = MenuItem::new(
-            tray_label("Программа", "Ctrl+Shift+3"),
+            tray_label("Программа", &hotkeys.program),
             true,
-            accelerator(Code::Digit3),
+            accelerator(&hotkeys.program),
         );
         let audio = MenuItem::new(
-            tray_label("Только аудио", "Ctrl+Shift+4"),
+            tray_label("Только аудио", &hotkeys.audio_only),
             true,
-            accelerator(Code::Digit4),
+            accelerator(&hotkeys.audio_only),
         );
         let stop = MenuItem::new(
-            tray_label("Остановить запись", "Ctrl+Shift+5"),
+            tray_label("Остановить запись", &hotkeys.stop),
             false,
-            accelerator(Code::Digit5),
+            accelerator(&hotkeys.stop),
         );
         let show = MenuItem::new("Показать", true, None);
         let quit = MenuItem::new("Выход", true, None);
@@ -596,24 +607,119 @@ impl ScreenRecorderApp {
                 return;
             }
         };
-        let bindings = [
-            (Code::Digit1, TrayCommand::FullScreen),
-            (Code::Digit2, TrayCommand::Area),
-            (Code::Digit3, TrayCommand::Program),
-            (Code::Digit4, TrayCommand::AudioOnly),
-            (Code::Digit5, TrayCommand::Stop),
-        ];
-        let mut registered = Vec::new();
-        for (code, command) in bindings {
-            let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), code);
-            if let Err(error) = manager.register(hotkey) {
-                self.log = format!("Горячая клавиша {code:?} недоступна: {error}");
-                continue;
-            }
-            registered.push((hotkey.id(), command));
-        }
         self.hotkey_manager = Some(manager);
+        self.register_x11_hotkeys();
+    }
+
+    /// Перерегистрирует X11-сочетания из настроек.
+    fn register_x11_hotkeys(&mut self) {
+        let mut registered = Vec::new();
+        let mut errors = Vec::new();
+        if let Some(manager) = self.hotkey_manager.as_ref() {
+            let old = self
+                .hotkey_bindings
+                .iter()
+                .map(|(hotkey, _)| *hotkey)
+                .collect::<Vec<_>>();
+            if !old.is_empty() {
+                let _ = manager.unregister_all(&old);
+            }
+            let bindings = [
+                (
+                    self.settings.hotkeys.fullscreen.clone(),
+                    TrayCommand::FullScreen,
+                ),
+                (self.settings.hotkeys.area.clone(), TrayCommand::Area),
+                (self.settings.hotkeys.program.clone(), TrayCommand::Program),
+                (
+                    self.settings.hotkeys.audio_only.clone(),
+                    TrayCommand::AudioOnly,
+                ),
+                (self.settings.hotkeys.stop.clone(), TrayCommand::Stop),
+            ];
+            for (combo, command) in bindings {
+                let Some(hotkey) = parse_hotkey(&combo) else {
+                    errors.push(format!("неверное сочетание: {combo}"));
+                    continue;
+                };
+                if let Err(error) = manager.register(hotkey) {
+                    errors.push(format!("{combo}: {error}"));
+                    continue;
+                }
+                registered.push((hotkey, command));
+            }
+        }
         self.hotkey_bindings = registered;
+        if !errors.is_empty() {
+            self.log = errors.join("; ");
+        }
+    }
+
+    /// Применяет изменённые сочетания к X11 и подписям трея.
+    fn apply_hotkeys(&mut self) {
+        self.register_x11_hotkeys();
+        self.refresh_tray_hotkey_labels();
+    }
+
+    /// Обновляет подписи сочетаний в меню трея.
+    fn refresh_tray_hotkey_labels(&self) {
+        for (item, command, name) in &self.tray_hotkey_items {
+            let combo = self.hotkey_combo(*command);
+            if !combo.is_empty() {
+                item.set_text(tray_label(name, combo));
+            }
+        }
+    }
+
+    /// Возвращает сочетание для команды.
+    fn hotkey_combo(&self, command: TrayCommand) -> &str {
+        match command {
+            TrayCommand::FullScreen => &self.settings.hotkeys.fullscreen,
+            TrayCommand::Area => &self.settings.hotkeys.area,
+            TrayCommand::Program => &self.settings.hotkeys.program,
+            TrayCommand::AudioOnly => &self.settings.hotkeys.audio_only,
+            TrayCommand::Stop => &self.settings.hotkeys.stop,
+            TrayCommand::Show | TrayCommand::Quit => "",
+        }
+    }
+
+    /// Записывает новое сочетание в настройки и применяет его.
+    fn set_hotkey(&mut self, field: HotkeyField, combo: String) {
+        match field {
+            HotkeyField::FullScreen => self.settings.hotkeys.fullscreen = combo,
+            HotkeyField::Area => self.settings.hotkeys.area = combo,
+            HotkeyField::Program => self.settings.hotkeys.program = combo,
+            HotkeyField::AudioOnly => self.settings.hotkeys.audio_only = combo,
+            HotkeyField::Stop => self.settings.hotkeys.stop = combo,
+        }
+        self.settings_dirty = true;
+    }
+
+    /// Ловит следующее сочетание клавиш для выбранного поля.
+    fn capture_hotkey(&mut self, ctx: &egui::Context) {
+        let Some(field) = self.hotkey_edit else {
+            return;
+        };
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.hotkey_edit = None;
+            return;
+        }
+        let captured = ctx.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } => format_hotkey(*key, *modifiers),
+                _ => None,
+            })
+        });
+        if let Some(combo) = captured {
+            self.set_hotkey(field, combo);
+            self.hotkey_edit = None;
+        }
     }
 
     /// Обновляет подписи трея фактическими сочетаниями из портала.
@@ -691,7 +797,7 @@ impl ScreenRecorderApp {
             if let Some((_, command)) = self
                 .hotkey_bindings
                 .iter()
-                .find(|(id, _)| *id == event.id)
+                .find(|(hotkey, _)| hotkey.id() == event.id)
                 .copied()
             {
                 self.execute_tray_command(command);
@@ -3203,21 +3309,13 @@ impl ScreenRecorderApp {
             ui.add_space(2.0);
             if let Some(progress) = self.ml_progress.as_ref().filter(|_| self.transcribing) {
                 let stage = match progress.stage.as_str() {
-                    "asr:system" => "Whisper · система",
-                    "asr:mic" => "Whisper · микрофон",
-                    "asr" => "Whisper",
-                    "diarization" => "Диаризация",
-                    _ => "Обработка",
-                };
-                let device = match progress.device.as_str() {
-                    "gpu" => " · GPU",
-                    "cpu" => " · CPU",
-                    _ => "",
+                    "diarization" => "Голоса",
+                    _ => "Распознавание",
                 };
                 ui.add(
                     egui::ProgressBar::new((progress.percent / 100.0).clamp(0.0, 1.0))
                         .desired_width(ui.available_width())
-                        .text(format!("{stage}{device} · {:.0}%", progress.percent)),
+                        .text(format!("{stage} · {:.0}%", progress.percent)),
                 );
             } else {
                 ui.add(
@@ -3262,7 +3360,7 @@ impl ScreenRecorderApp {
         if self.recording && self.wayland_pending {
             return (
                 "Ожидание доступа",
-                "Подтвердите доступ к экрану в системном диалоге портала.".to_string(),
+                "Подтвердите доступ к экрану в системном окне.".to_string(),
                 true,
                 false,
             );
@@ -3279,7 +3377,7 @@ impl ScreenRecorderApp {
             return (
                 "Идёт запись",
                 format!(
-                    "{mode} · {:02}:{:02} · видео и аудио пишутся в каталог сессии",
+                    "{mode} · {:02}:{:02} · идёт запись видео и звука",
                     elapsed / 60,
                     elapsed % 60
                 ),
@@ -3290,7 +3388,7 @@ impl ScreenRecorderApp {
         if self.stopping {
             return (
                 "Остановка",
-                "Завершаю видео и аудиодорожки, затем начнётся экспорт.".to_string(),
+                "Завершаю запись и готовлю файл.".to_string(),
                 true,
                 false,
             );
@@ -3298,20 +3396,15 @@ impl ScreenRecorderApp {
         if self.exporting {
             return (
                 "Экспорт",
-                "Собираю видео, системный звук и микрофон в итоговый файл.".to_string(),
+                "Собираю видео и звук в готовый файл.".to_string(),
                 true,
                 false,
             );
         }
         if self.transcribing {
-            let engine = if self.settings.diarization.engine == "nemo" {
-                "NeMo Sortformer"
-            } else {
-                "sherpa-onnx"
-            };
             return (
                 "Распознавание",
-                format!("Whisper распознаёт дорожки по очереди, затем спикеры через {engine}."),
+                "Распознаю речь и определяю, кто говорит.".to_string(),
                 true,
                 false,
             );
@@ -3320,9 +3413,7 @@ impl ScreenRecorderApp {
         if queued > 0 {
             return (
                 "В очереди",
-                format!(
-                    "Ожидают выполнения задач: {queued}. Экспорт и распознавание идут по очереди."
-                ),
+                format!("Ещё задач в очереди: {queued}."),
                 true,
                 false,
             );
@@ -3341,7 +3432,7 @@ impl ScreenRecorderApp {
         if export_ready {
             return (
                 "Готово",
-                "Видео экспортировано. Транскрипция отключена в настройках.".to_string(),
+                "Видео экспортировано. Распознавание отключено в настройках.".to_string(),
                 false,
                 false,
             );
@@ -3349,8 +3440,7 @@ impl ScreenRecorderApp {
         if !self.model_manager.is_downloaded("whisper") {
             return (
                 "Модели не скачаны",
-                "Откройте «Настройки → Модели» и скачайте Whisper, VAD и модель диаризации."
-                    .to_string(),
+                "Скачайте модели в настройках.".to_string(),
                 false,
                 false,
             );
@@ -3363,9 +3453,8 @@ impl ScreenRecorderApp {
             };
             if !ready {
                 return (
-                    "Не хватает модели диаризации",
-                    "Откройте «Настройки → Модели», скачайте выбранную модель или отключите диаризацию."
-                        .to_string(),
+                    "Не хватает модели для разделения голосов",
+                    "Скачайте её в настройках или отключите разделение голосов.".to_string(),
                     false,
                     false,
                 );
@@ -3589,6 +3678,7 @@ impl ScreenRecorderApp {
 
     /// Рисует вкладку «Настройки».
     fn draw_settings(&mut self, ui: &mut egui::Ui) {
+        self.capture_hotkey(ui.ctx());
         let whisper_ready = self.model_manager.is_downloaded("whisper");
         let diarization_ready = self.model_manager.is_downloaded("diarization");
         let vad_ready = self.model_manager.is_downloaded("vad");
@@ -3627,7 +3717,7 @@ impl ScreenRecorderApp {
                         "sherpa-onnx",
                         diarization_ready,
                         diarization_progress,
-                        &format!("диаризация: сегментация + эмбеддинги · {diarization_size}"),
+                        &format!("кто говорит · {diarization_size}"),
                     ) {
                         Some(ModelAction::Download) => requested = Some("diarization"),
                         Some(ModelAction::Delete) => delete_requested = Some("diarization"),
@@ -3639,7 +3729,7 @@ impl ScreenRecorderApp {
                         "Silero VAD",
                         vad_ready,
                         vad_progress,
-                        &format!("речь/тишина для Whisper · {vad_size}"),
+                        &format!("речь и тишина · {vad_size}"),
                     ) {
                         Some(ModelAction::Download) => requested = Some("vad"),
                         Some(ModelAction::Delete) => delete_requested = Some("vad"),
@@ -3651,7 +3741,7 @@ impl ScreenRecorderApp {
                         "NeMo Sortformer",
                         nemo_ready,
                         nemo_progress,
-                        &format!("диаризация: до 8 спикеров · {nemo_size}"),
+                        &format!("до 8 говорящих · {nemo_size}"),
                     ) {
                         Some(ModelAction::Download) => requested = Some("nemo"),
                         Some(ModelAction::Delete) => delete_requested = Some("nemo"),
@@ -3659,7 +3749,7 @@ impl ScreenRecorderApp {
                     }
 
                     ui.add_space(6.0);
-                    ui.label("Чем обрабатывать спикеров:");
+                    ui.label("Разделение говорящих:");
                     if Self::diarization_combo(ui, &mut self.settings.diarization.engine) {
                         self.settings_dirty = true;
                     }
@@ -3757,7 +3847,7 @@ impl ScreenRecorderApp {
                     if ui
                         .checkbox(
                             &mut self.settings.transcription.enabled,
-                            "Включить транскрипцию",
+                            "Распознавать речь",
                         )
                         .changed()
                     {
@@ -3766,7 +3856,7 @@ impl ScreenRecorderApp {
                     if ui
                         .checkbox(
                             &mut self.settings.diarization.enabled,
-                            "Включить диаризацию",
+                            "Разделять по говорящим",
                         )
                         .changed()
                     {
@@ -3811,12 +3901,6 @@ impl ScreenRecorderApp {
                             pick_output = true;
                         }
                     });
-                    ui.add_space(4.0);
-                    ui.label(
-                        RichText::new(format!("Файл: {}", self.paths.settings_path().display()))
-                            .size(11.0)
-                            .color(HINT),
-                    );
                 });
 
                 if pick_models {
@@ -3827,42 +3911,52 @@ impl ScreenRecorderApp {
                 }
 
                 ui.add_space(6.0);
-                let executable = std::env::current_exe()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|_| "screenrecorder".to_string());
-                let mut open_keyboard = false;
+                let hotkeys = [
+                    (
+                        self.settings.hotkeys.fullscreen.clone(),
+                        "Весь экран",
+                        HotkeyField::FullScreen,
+                    ),
+                    (
+                        self.settings.hotkeys.area.clone(),
+                        "Область экрана",
+                        HotkeyField::Area,
+                    ),
+                    (
+                        self.settings.hotkeys.program.clone(),
+                        "Программа",
+                        HotkeyField::Program,
+                    ),
+                    (
+                        self.settings.hotkeys.audio_only.clone(),
+                        "Только аудио",
+                        HotkeyField::AudioOnly,
+                    ),
+                    (
+                        self.settings.hotkeys.stop.clone(),
+                        "Остановить запись",
+                        HotkeyField::Stop,
+                    ),
+                ];
+                let mut edit_hotkey = None;
                 Self::section(
                     ui,
                     "Глобальные горячие клавиши",
                     |ui| {
-                        ui.label(
-                            RichText::new("Сочетания задаются в настройках системы.")
-                                .size(11.0)
-                                .color(HINT),
-                        );
-                        ui.add_space(4.0);
-                        for (keys, name, action) in [
-                            ("Ctrl+Shift+1", "Весь экран", "fullscreen"),
-                            ("Ctrl+Shift+2", "Область экрана", "area"),
-                            ("Ctrl+Shift+3", "Программа", "program"),
-                            ("Ctrl+Shift+4", "Только аудио", "audio_only"),
-                            ("Ctrl+Shift+5", "Остановить запись", "stop"),
-                        ] {
-                            let command = format!("{executable} --hotkey {action}");
+                        for (combo, name, field) in hotkeys {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(keys).monospace().color(TEXT))
-                                    .on_hover_text(command);
+                                ui.label(RichText::new(combo).monospace().color(TEXT));
                                 ui.label(RichText::new(name).size(11.0).color(TEXT));
                                 if ui.small_button("Изменить").clicked() {
-                                    open_keyboard = true;
+                                    edit_hotkey = Some(field);
                                 }
                             });
                             ui.add_space(3.0);
                         }
                     },
                 );
-                if open_keyboard {
-                    open_keyboard_settings();
+                if let Some(field) = edit_hotkey {
+                    self.hotkey_edit = Some(field);
                 }
 
                 ui.add_space(6.0);
@@ -3872,6 +3966,23 @@ impl ScreenRecorderApp {
                         .color(HINT),
                 );
             });
+
+        if self.hotkey_edit.is_some() {
+            let mut cancel = false;
+            egui::Window::new("Новое сочетание")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(ui.ctx(), |ui| {
+                    ui.label("Нажмите сочетание клавиш.");
+                    if ui.button("Отмена").clicked() {
+                        cancel = true;
+                    }
+                });
+            if cancel {
+                self.hotkey_edit = None;
+            }
+        }
     }
 
     /// Рисует вкладку «О авторе».
@@ -3964,6 +4075,9 @@ impl ScreenRecorderApp {
         };
         self.model_manager = ModelManager::new(models_root);
         self.audio_devices = LinuxAudioRecorder::list_devices().unwrap_or_default();
+        if self.hotkey_manager.is_some() {
+            self.apply_hotkeys();
+        }
         if !self.recording && !self.transcribing && !self.exporting {
             self.status = if self.model_manager.is_downloaded("whisper") {
                 "Готово к записи".to_string()
@@ -4243,29 +4357,6 @@ fn is_wayland() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
-/// Открывает системные настройки клавиатуры.
-///
-/// Глобальные сочетания на Wayland принадлежат системе; приложение не
-/// меняет их само, а показывает, где это сделать.
-fn open_keyboard_settings() {
-    match Command::new("gnome-control-center")
-        .arg("keyboard")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(mut child) => {
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-        }
-        Err(error) => {
-            tracing::warn!(%error, "не удалось открыть настройки клавиатуры");
-        }
-    }
-}
-
 /// Убирает суффикс ` (deleted)` из пути к исполняемому файлу.
 ///
 /// Linux добавляет его в `/proc/self/exe`, если бинарник пересобрали или
@@ -4323,6 +4414,102 @@ fn recording_mode_static(mode: &str) -> Option<&'static str> {
         "Только аудио" => Some("Только аудио"),
         _ => None,
     }
+}
+
+/// Разбирает строку сочетания в глобальную горячую клавишу.
+///
+/// Одиночные клавиши без модификаторов не принимаем: они мешают вводу.
+fn parse_hotkey(combo: &str) -> Option<HotKey> {
+    let hotkey = combo.parse::<HotKey>().ok()?;
+    if hotkey.mods.is_empty() {
+        return None;
+    }
+    Some(hotkey)
+}
+
+/// Формирует строку сочетания из нажатой клавиши и модификаторов.
+fn format_hotkey(key: egui::Key, modifiers: egui::Modifiers) -> Option<String> {
+    let key_name = match key {
+        egui::Key::Num0 => "0",
+        egui::Key::Num1 => "1",
+        egui::Key::Num2 => "2",
+        egui::Key::Num3 => "3",
+        egui::Key::Num4 => "4",
+        egui::Key::Num5 => "5",
+        egui::Key::Num6 => "6",
+        egui::Key::Num7 => "7",
+        egui::Key::Num8 => "8",
+        egui::Key::Num9 => "9",
+        egui::Key::A => "A",
+        egui::Key::B => "B",
+        egui::Key::C => "C",
+        egui::Key::D => "D",
+        egui::Key::E => "E",
+        egui::Key::F => "F",
+        egui::Key::G => "G",
+        egui::Key::H => "H",
+        egui::Key::I => "I",
+        egui::Key::J => "J",
+        egui::Key::K => "K",
+        egui::Key::L => "L",
+        egui::Key::M => "M",
+        egui::Key::N => "N",
+        egui::Key::O => "O",
+        egui::Key::P => "P",
+        egui::Key::Q => "Q",
+        egui::Key::R => "R",
+        egui::Key::S => "S",
+        egui::Key::T => "T",
+        egui::Key::U => "U",
+        egui::Key::V => "V",
+        egui::Key::W => "W",
+        egui::Key::X => "X",
+        egui::Key::Y => "Y",
+        egui::Key::Z => "Z",
+        egui::Key::F1 => "F1",
+        egui::Key::F2 => "F2",
+        egui::Key::F3 => "F3",
+        egui::Key::F4 => "F4",
+        egui::Key::F5 => "F5",
+        egui::Key::F6 => "F6",
+        egui::Key::F7 => "F7",
+        egui::Key::F8 => "F8",
+        egui::Key::F9 => "F9",
+        egui::Key::F10 => "F10",
+        egui::Key::F11 => "F11",
+        egui::Key::F12 => "F12",
+        egui::Key::Space => "Space",
+        egui::Key::Minus => "Minus",
+        egui::Key::Equals => "Equal",
+        egui::Key::Comma => "Comma",
+        egui::Key::Period => "Period",
+        egui::Key::Slash => "Slash",
+        egui::Key::Semicolon => "Semicolon",
+        egui::Key::Quote => "Quote",
+        egui::Key::Backslash => "Backslash",
+        egui::Key::OpenBracket => "BracketLeft",
+        egui::Key::CloseBracket => "BracketRight",
+        egui::Key::Backtick => "Backquote",
+        _ => return None,
+    };
+    if !(modifiers.ctrl || modifiers.alt || modifiers.shift || modifiers.mac_cmd) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if modifiers.ctrl {
+        parts.push("Ctrl");
+    }
+    if modifiers.alt {
+        parts.push("Alt");
+    }
+    if modifiers.shift {
+        parts.push("Shift");
+    }
+    if modifiers.mac_cmd {
+        parts.push("Super");
+    }
+    parts.push(key_name);
+    Some(parts.join("+"))
 }
 
 /// Формирует подпись пункта меню трея.
@@ -4912,6 +5099,23 @@ mod tests {
         );
         assert_eq!(parse_hotkey_action("stop"), Some(HotkeyAction::Stop));
         assert_eq!(parse_hotkey_action("unknown"), None);
+    }
+
+    /// Проверяет ввод и разбор пользовательского сочетания.
+    #[test]
+    fn formats_and_parses_hotkeys() {
+        let combo = format_hotkey(
+            egui::Key::Num1,
+            egui::Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Default::default()
+            },
+        )
+        .expect("combo");
+        assert_eq!(combo, "Ctrl+Shift+1");
+        assert!(parse_hotkey(&combo).is_some());
+        assert!(parse_hotkey("1").is_none());
     }
 
     /// Проверяет приоритет X11 и запасной Wayland.

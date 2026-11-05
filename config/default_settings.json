@@ -35,5 +35,12 @@
   },
   "ui": {
     "theme": "system"
+  },
+  "hotkeys": {
+    "fullscreen": "Ctrl+Shift+1",
+    "area": "Ctrl+Shift+2",
+    "program": "Ctrl+Shift+3",
+    "audio_only": "Ctrl+Shift+4",
+    "stop": "Ctrl+Shift+5"
   }
 }
