@@ -3830,18 +3830,15 @@ impl ScreenRecorderApp {
                 let executable = std::env::current_exe()
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|_| "screenrecorder".to_string());
+                let mut open_keyboard = false;
                 Self::section(
                     ui,
                     "Глобальные горячие клавиши",
                     |ui| {
                         ui.label(
-                            RichText::new(
-                                "На Wayland добавьте эти команды в «Настройки → Клавиатура → \
-                             Собственные сочетания». На X11 приложение регистрирует \
-                             Ctrl+Shift+1…5 само.",
-                            )
-                            .size(11.0)
-                            .color(HINT),
+                            RichText::new("Сочетания задаются в настройках системы.")
+                                .size(11.0)
+                                .color(HINT),
                         );
                         ui.add_space(4.0);
                         for (keys, name, action) in [
@@ -3853,17 +3850,20 @@ impl ScreenRecorderApp {
                         ] {
                             let command = format!("{executable} --hotkey {action}");
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(keys).monospace().color(TEXT));
+                                ui.label(RichText::new(keys).monospace().color(TEXT))
+                                    .on_hover_text(command);
                                 ui.label(RichText::new(name).size(11.0).color(TEXT));
-                                if ui.small_button("Скопировать").clicked() {
-                                    ui.ctx().copy_text(command.clone());
+                                if ui.small_button("Изменить").clicked() {
+                                    open_keyboard = true;
                                 }
                             });
-                            ui.label(RichText::new(command).monospace().size(10.0).color(LINK));
                             ui.add_space(3.0);
                         }
                     },
                 );
+                if open_keyboard {
+                    open_keyboard_settings();
+                }
 
                 ui.add_space(6.0);
                 ui.label(
@@ -4241,6 +4241,29 @@ fn process_rss_mb() -> Option<u64> {
 /// обычный `Focus`/`Minimized(false)` не работают.
 fn is_wayland() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some()
+}
+
+/// Открывает системные настройки клавиатуры.
+///
+/// Глобальные сочетания на Wayland принадлежат системе; приложение не
+/// меняет их само, а показывает, где это сделать.
+fn open_keyboard_settings() {
+    match Command::new("gnome-control-center")
+        .arg("keyboard")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(error) => {
+            tracing::warn!(%error, "не удалось открыть настройки клавиатуры");
+        }
+    }
 }
 
 /// Убирает суффикс ` (deleted)` из пути к исполняемому файлу.
