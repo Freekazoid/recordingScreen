@@ -3494,7 +3494,7 @@ impl ScreenRecorderApp {
                         "Silero VAD",
                         vad_ready,
                         vad_progress,
-                        &format!("определение пауз речи · {vad_size}"),
+                        &format!("речь/тишина для Whisper · {vad_size}"),
                     ) {
                         Some(ModelAction::Download) => requested = Some("vad"),
                         Some(ModelAction::Delete) => delete_requested = Some("vad"),
