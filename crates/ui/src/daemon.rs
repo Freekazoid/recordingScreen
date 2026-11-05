@@ -28,14 +28,11 @@ enum Event {
 pub fn run_daemon(paths: Paths, settings: Settings) -> Result<(), String> {
     let socket = ipc::socket_path(&paths);
     ipc::ensure_socket_dir(&socket)?;
-    if socket.exists() && UnixStream::connect(&socket).is_ok() {
-        // Второй экземпляр не нужен: первый уже обслуживает окно.
+    let Some(listener) = bind_socket(&socket)? else {
+        tracing::info!("сервис уже запущен");
         return Ok(());
-    }
-    let _ = std::fs::remove_file(&socket);
-    let listener = UnixListener::bind(&socket)
-        .map_err(|error| format!("сокет {}: {error}", socket.display()))?;
-    let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
+    };
+    tracing::info!(socket = %socket.display(), "сервис запущен");
 
     let (events_tx, events_rx) = mpsc::channel();
     spawn_accept(listener, events_tx);
@@ -54,7 +51,25 @@ pub fn run_daemon(paths: Paths, settings: Settings) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(20));
     };
     let _ = std::fs::remove_file(&socket);
+    tracing::info!("сервис остановлен");
     result
+}
+
+/// Создаёт сокет; `None`, если сервис уже обслуживает этот путь.
+///
+/// Stale-файл после `kill -9` удаляется: иначе новый сервис не смог бы
+/// занять адрес.
+fn bind_socket(socket: &std::path::Path) -> Result<Option<UnixListener>, String> {
+    if socket.exists() {
+        if UnixStream::connect(socket).is_ok() {
+            return Ok(None);
+        }
+        let _ = std::fs::remove_file(socket);
+    }
+    let listener = UnixListener::bind(socket)
+        .map_err(|error| format!("сокет {}: {error}", socket.display()))?;
+    let _ = std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600));
+    Ok(Some(listener))
 }
 
 /// Принимает клиентов в отдельном потоке.
@@ -87,6 +102,7 @@ fn handle_client(stream: UnixStream, events: Sender<Event>) {
             break;
         }
         let Ok(request) = serde_json::from_str::<Request>(&line) else {
+            tracing::warn!("некорректный запрос окна");
             let response = Response::Error {
                 message: "некорректный запрос".to_string(),
             };
@@ -141,6 +157,7 @@ fn drain_events(app: &mut ScreenRecorderApp, events: &Receiver<Event>) {
         match event {
             Event::Disconnected => {
                 app.ui_clients = app.ui_clients.saturating_sub(1);
+                tracing::info!(clients = app.ui_clients, "окно отключилось");
                 if app.ui_clients == 0 && app.tray.is_none() {
                     // Без трея закрытое окно нельзя вернуть: не оставляем
                     // невидимый сервис, который продолжил бы запись.
@@ -166,12 +183,14 @@ fn handle_request(app: &mut ScreenRecorderApp, request: Request) -> Response {
                 };
             }
             if app.ui_clients > 0 {
+                tracing::warn!("повторное окно отклонено");
                 Response::Hello {
                     accepted: false,
                     version: PROTOCOL_VERSION,
                 }
             } else {
                 app.ui_clients += 1;
+                tracing::info!(clients = app.ui_clients, "окно подключилось");
                 Response::Hello {
                     accepted: true,
                     version: PROTOCOL_VERSION,
@@ -180,14 +199,17 @@ fn handle_request(app: &mut ScreenRecorderApp, request: Request) -> Response {
         }
         Request::Snapshot => Response::Snapshot(app.snapshot()),
         Request::Start(start) => {
+            tracing::info!(mode = ?start.mode, region = ?start.region, "запрос старта записи");
             app.request_start(start);
             Response::Ok
         }
         Request::Stop => {
+            tracing::info!("запрос остановки записи");
             app.stop_recording();
             Response::Ok
         }
         Request::CancelMl => {
+            tracing::info!("запрос отмены ML");
             app.cancel_ml();
             Response::Ok
         }
@@ -212,8 +234,34 @@ fn handle_request(app: &mut ScreenRecorderApp, request: Request) -> Response {
             Response::Ok
         }
         Request::Quit => {
+            tracing::info!("запрос завершения сервиса");
             app.request_quit();
             Response::Ok
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Проверяет, что stale-файл сокета заменяется рабочим.
+    #[test]
+    fn replaces_stale_socket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("daemon.sock");
+        std::fs::write(&socket, b"stale").expect("stale");
+        let listener = bind_socket(&socket).expect("bind").expect("listener");
+        assert!(UnixStream::connect(&socket).is_ok());
+        drop(listener);
+    }
+
+    /// Проверяет, что второй сервис не занимает тот же сокет.
+    #[test]
+    fn detects_running_service() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("daemon.sock");
+        let _listener = UnixListener::bind(&socket).expect("bind");
+        assert!(bind_socket(&socket).expect("check").is_none());
     }
 }

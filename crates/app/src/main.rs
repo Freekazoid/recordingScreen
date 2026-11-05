@@ -1,34 +1,29 @@
 //! Точка входа Screen Recorder 4.0.
 //!
-//! Поддерживает `--version`, `--diagnose` и `--select-area` для проверки
-//! окружения и выбора области.
+//! Поддерживает окно, фоновый сервис, `--diagnose`, `--select-area` и
+//! `--ml-worker`.
 
 mod area_selector;
+mod logging;
 
 use anyhow::Context;
 use screenrecorder_adapters::Paths;
-use screenrecorder_application::SettingsStore;
+use screenrecorder_application::{Settings, SettingsStore, legacy_settings_candidates};
 use serde_json::json;
 use std::path::Path;
-use tracing_subscriber::EnvFilter;
 
-/// Инициализирует структурное логирование в stderr.
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .try_init();
+/// Загружает настройки v4 или мигрирует legacy 3.x.
+fn load_settings(paths: &Paths) -> anyhow::Result<Settings> {
+    let legacy = legacy_settings_candidates(&paths.settings_path());
+    SettingsStore::new(paths.settings_path())
+        .load_or_create_migrating(&legacy)
+        .context("не удалось загрузить настройки")
 }
 
 /// Печатает отчёт о версии, путях, настройках и правах на запись.
-fn print_diagnostics() -> anyhow::Result<()> {
-    let paths = Paths::discover().context("не удалось определить каталоги приложения")?;
-    paths.ensure_all().context("не удалось создать каталоги")?;
+fn print_diagnostics(paths: &Paths) -> anyhow::Result<()> {
+    let settings = load_settings(paths)?;
     let store = SettingsStore::new(paths.settings_path());
-    let settings = store
-        .load_or_create()
-        .context("не удалось загрузить настройки")?;
 
     let writable = |path: &std::path::Path| paths.ensure_writable(path).is_ok();
     let report = json!({
@@ -41,6 +36,7 @@ fn print_diagnostics() -> anyhow::Result<()> {
             "config": paths.config_dir,
             "cache": paths.cache_dir,
             "logs": paths.log_dir,
+            "log_file": logging::path(paths),
             "temp": paths.temp_dir,
             "output": paths.default_output_dir,
             "settings": store.path(),
@@ -56,30 +52,34 @@ fn print_diagnostics() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Запускает приложение или диагностику.
+/// Запускает приложение, сервис, диагностику или выбор области.
 fn main() -> anyhow::Result<()> {
-    init_tracing();
-
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
         println!("screenrecorder {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    if args.iter().any(|arg| arg == "--diagnose") {
-        return print_diagnostics();
-    }
-    if args.iter().any(|arg| arg == "--daemon") {
-        let paths = Paths::discover().context("не удалось определить каталоги приложения")?;
-        paths.ensure_all().context("не удалось создать каталоги")?;
-        let settings = SettingsStore::new(paths.settings_path())
-            .load_or_create()
-            .context("не удалось загрузить настройки")?;
-        return screenrecorder_ui::run_daemon(paths, settings)
-            .map_err(|error| anyhow::anyhow!("фоновый сервис: {error}"));
-    }
     if args.iter().any(|arg| arg == "--ml-worker") {
+        logging::init_stderr();
         return screenrecorder_ml_worker::run_stdio();
     }
+
+    let paths = Paths::discover().context("не удалось определить каталоги приложения")?;
+    paths.ensure_all().context("не удалось создать каталоги")?;
+    let role = if args.iter().any(|arg| arg == "--daemon") {
+        "daemon"
+    } else if args.iter().any(|arg| arg == "--select-area") {
+        "area-selector"
+    } else if args.iter().any(|arg| arg == "--diagnose") {
+        "diagnose"
+    } else {
+        "ui"
+    };
+    if let Err(error) = logging::init(&paths, role) {
+        eprintln!("Файловый лог недоступен: {error}");
+    }
+    tracing::info!(?args, role, "аргументы запуска");
+
     if let Some(index) = args.iter().position(|arg| arg == "--select-area") {
         let image = args
             .get(index + 1)
@@ -89,12 +89,15 @@ fn main() -> anyhow::Result<()> {
             .context("--select-area: не указан файл результата")?;
         return area_selector::run(Path::new(image), Path::new(out));
     }
+    if args.iter().any(|arg| arg == "--diagnose") {
+        return print_diagnostics(&paths);
+    }
 
-    let paths = Paths::discover().context("не удалось определить каталоги приложения")?;
-    paths.ensure_all().context("не удалось создать каталоги")?;
-    let settings = SettingsStore::new(paths.settings_path())
-        .load_or_create()
-        .context("не удалось загрузить настройки")?;
+    let settings = load_settings(&paths)?;
+    if args.iter().any(|arg| arg == "--daemon") {
+        return screenrecorder_ui::run_daemon(paths, settings)
+            .map_err(|error| anyhow::anyhow!("фоновый сервис: {error}"));
+    }
 
     screenrecorder_ui::run(paths, settings)
         .map_err(|error| anyhow::anyhow!("не удалось запустить интерфейс: {error}"))

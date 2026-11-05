@@ -4276,6 +4276,7 @@ name = "screenrecorder-app"
 version = "4.0.0-alpha.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "eframe",
  "image",
  "screenrecorder-adapters",
@@ -4299,6 +4300,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tracing",
  "uuid",
 ]
 
@@ -4376,6 +4378,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tracing",
  "tray-icon",
 ]
 

@@ -5,6 +5,7 @@
 //! каталоге конфигурации при первом запуске.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -353,6 +354,44 @@ impl SettingsStore {
         Ok(settings)
     }
 
+    /// Загружает v4-настройки; если файла нет, пробует мигрировать 3.x.
+    pub fn load_or_create_migrating(&self, legacy: &[PathBuf]) -> Result<Settings, SettingsError> {
+        if self.path.exists() {
+            return self.load();
+        }
+        for path in legacy {
+            if !path.is_file() {
+                continue;
+            }
+            let raw = match fs::read_to_string(path) {
+                Ok(raw) => raw,
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "legacy-настройки не прочитаны");
+                    continue;
+                }
+            };
+            match migrate_legacy_settings(&raw) {
+                Ok(Some(settings)) => {
+                    self.save(&settings)?;
+                    tracing::info!(
+                        source = %path.display(),
+                        "настройки 3.x мигрированы в v4"
+                    );
+                    return Ok(settings);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "legacy-настройки пропущены"
+                    );
+                }
+            }
+        }
+        self.load_or_create()
+    }
+
     /// Атомарно сохраняет настройки, заменяя файл только целиком.
     pub fn save(&self, settings: &Settings) -> Result<(), SettingsError> {
         settings.validate()?;
@@ -386,6 +425,219 @@ impl SettingsStore {
     }
 }
 
+/// Возвращает кандидатов на legacy-файл настроек 3.x.
+///
+/// v4 хранит настройки в `config_dir`, а 3.x — рядом с программой или в
+/// XDG-каталоге данных. Порядок: exe, текущий каталог, XDG data, macOS,
+/// Windows. Отсутствующие и совпадающие с v4 файлы отбрасываются.
+pub fn legacy_settings_candidates(settings_path: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join("settings.json"));
+    }
+    if let Ok(cwd) = std::env::current_dir()
+        && cwd.join("src/default_settings.json").is_file()
+    {
+        // Dev-режим 3.x: settings.json лежит в корне проекта, а бинарник —
+        // в target/debug. Не читаем произвольный settings.json из CWD.
+        candidates.push(cwd.join("settings.json"));
+    }
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+        let base = PathBuf::from(data);
+        candidates.push(base.join("ScreenRecorder").join("settings.json"));
+        candidates.push(base.join("screenrecorder").join("settings.json"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        candidates.push(home.join(".local/share/ScreenRecorder/settings.json"));
+        candidates.push(home.join("Library/Application Support/ScreenRecorder/settings.json"));
+    }
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        candidates.push(
+            PathBuf::from(appdata)
+                .join("ScreenRecorder")
+                .join("settings.json"),
+        );
+    }
+    candidates.retain(|path| path != settings_path && path.is_file());
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+/// Проверяет, что JSON похож на настройки 3.x, а не на v4.
+fn is_legacy_settings(value: &Value) -> bool {
+    value.is_object()
+        && value.get("schema_version").is_none()
+        && value.get("capture").is_none()
+        && (value.get("transcription_engine").is_some()
+            || value.get("enable_transcription").is_some()
+            || value.get("audio_track_mode").is_some())
+}
+
+/// Читает настройки 3.x и переводит их в схему v4.
+///
+/// Возвращает `None`, если JSON уже в формате v4 или не похож на 3.x.
+pub fn migrate_legacy_settings(raw: &str) -> Result<Option<Settings>, SettingsError> {
+    let value: Value = serde_json::from_str(raw)?;
+    if !is_legacy_settings(&value) {
+        return Ok(None);
+    }
+    let mut settings = Settings {
+        schema_version: SCHEMA_VERSION,
+        language: text_value(&value, "language").unwrap_or_else(|| "ru".to_string()),
+        ..Settings::default()
+    };
+    settings.transcription.enabled = bool_value(&value, "enable_transcription").unwrap_or(true);
+    settings.transcription.compute_device = normalize_device(text_value(&value, "compute_device"));
+    settings.diarization.enabled = bool_value(&value, "enable_diarization").unwrap_or(true);
+    settings.diarization.engine = match text_value(&value, "diarization_method").as_deref() {
+        Some("nemo") => "nemo".to_string(),
+        Some("none") => "none".to_string(),
+        _ => "sherpa-onnx".to_string(),
+    };
+    settings.diarization.min_speakers = speaker_value(&value, "min_speakers");
+    settings.diarization.max_speakers = speaker_value(&value, "max_speakers");
+    if settings.diarization.min_speakers.is_none()
+        && settings.diarization.max_speakers.is_none()
+        && let Some(expected) = text_value(&value, "expected_speakers")
+    {
+        apply_expected_speakers(&mut settings, &expected);
+    }
+    settings.export.format = normalize_format(text_value(&value, "output_format"));
+    settings.export.video_quality = normalize_quality(text_value(&value, "video_quality"));
+    settings.export.audio_mode = normalize_audio_mode(text_value(&value, "audio_track_mode"));
+    settings.models_dir = legacy_models_dir(text_value(&value, "models_dir"));
+    settings.output_dir = text_value(&value, "output_dir").unwrap_or_default();
+    settings.validate()?;
+    Ok(Some(settings))
+}
+
+/// Извлекает непустую строку из JSON.
+fn text_value(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+/// Приводит значение к bool, включая строковые формы.
+fn bool_value(value: &Value, key: &str) -> Option<bool> {
+    match value.get(key)? {
+        Value::Bool(value) => Some(*value),
+        Value::Number(value) => Some(value.as_i64().unwrap_or_default() != 0),
+        Value::String(value) => match value.trim().to_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" | "да" | "истина" | "вкл" => Some(true),
+            "0" | "false" | "no" | "off" | "нет" | "ложь" | "выкл" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Читает число спикеров из числа или строки.
+fn speaker_value(value: &Value, key: &str) -> Option<u32> {
+    match value.get(key)? {
+        Value::Number(value) => value.as_u64().and_then(|value| u32::try_from(value).ok()),
+        Value::String(value) => value.trim().parse::<u32>().ok(),
+        _ => None,
+    }
+    .filter(|value| *value > 0)
+}
+
+/// Применяет `expected_speakers` вида `2` или `2-4`.
+fn apply_expected_speakers(settings: &mut Settings, expected: &str) {
+    let parts: Vec<&str> = expected.split('-').map(str::trim).collect();
+    match parts.as_slice() {
+        [single] => {
+            if let Ok(count) = single.parse::<u32>()
+                && count > 0
+            {
+                settings.diarization.min_speakers = Some(count);
+                settings.diarization.max_speakers = Some(count);
+            }
+        }
+        [min, max] => {
+            let min = min.parse::<u32>().ok();
+            let max = max.parse::<u32>().ok();
+            if let (Some(min), Some(max)) = (min, max)
+                && min > 0
+                && max >= min
+            {
+                settings.diarization.min_speakers = Some(min);
+                settings.diarization.max_speakers = Some(max);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Ограничивает устройство вычислений известными значениями.
+fn normalize_device(value: Option<String>) -> String {
+    match value.as_deref() {
+        Some("cpu") => "cpu".to_string(),
+        Some("gpu") => "gpu".to_string(),
+        _ => "auto".to_string(),
+    }
+}
+
+/// Приводит формат экспорта к поддерживаемому списку.
+fn normalize_format(value: Option<String>) -> String {
+    match value.as_deref().map(str::to_lowercase).as_deref() {
+        Some("mkv") => "mkv".to_string(),
+        Some("webm") => "webm".to_string(),
+        Some("avi") => "avi".to_string(),
+        Some("mov") => "mov".to_string(),
+        Some("flv") => "flv".to_string(),
+        _ => "mp4".to_string(),
+    }
+}
+
+/// Переводит старые подписи качества в актуальные.
+fn normalize_quality(value: Option<String>) -> String {
+    let value = value.unwrap_or_default();
+    if value.contains("CRF 18") {
+        "Отличное (CRF 18)".to_string()
+    } else if value.contains("CRF 28") {
+        "Среднее (CRF 28)".to_string()
+    } else if value.contains("CRF 35") {
+        "Сильное сжатие (CRF 35)".to_string()
+    } else {
+        "Хорошее (CRF 23)".to_string()
+    }
+}
+
+/// Переводит старые подписи аудиорежима в актуальные.
+fn normalize_audio_mode(value: Option<String>) -> String {
+    let value = value.unwrap_or_default().to_lowercase();
+    if value.contains("aac") || value.contains("сжать") {
+        "Сжать (AAC 128k)".to_string()
+    } else if value.contains("без звука") || value.contains("удалить") {
+        "Без звука".to_string()
+    } else {
+        "Без пережатия".to_string()
+    }
+}
+
+/// Переводит legacy-путь к моделям в фактический корень v4.
+///
+/// В 3.x `models_dir` — базовая папка, а модели лежат в `<base>/models`.
+/// Если пользователь уже указал саму папку `models`, оставляем её.
+fn legacy_models_dir(value: Option<String>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    let path = PathBuf::from(&value);
+    if path.file_name().and_then(|name| name.to_str()) == Some("models") {
+        return value;
+    }
+    path.join("models").display().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +667,81 @@ mod tests {
         let mut settings = Settings::default();
         settings.capture.fps = 0;
         assert!(settings.validate().is_err());
+    }
+
+    /// Проверяет миграцию настроек 3.x.
+    #[test]
+    fn migrates_legacy_settings() {
+        let raw = r#"{
+            "transcription_engine": "whisperx",
+            "diarization_method": "nemo",
+            "compute_device": "gpu",
+            "enable_transcription": true,
+            "enable_diarization": false,
+            "expected_speakers": "2-4",
+            "output_format": "MKV",
+            "video_quality": "Отличное (CRF 18) - почти без потерь",
+            "audio_track_mode": "Оставить как есть (без пережатия)",
+            "models_dir": "/tmp/legacy",
+            "output_dir": "/tmp/output"
+        }"#;
+        let settings = migrate_legacy_settings(raw)
+            .expect("migration")
+            .expect("legacy settings");
+        assert_eq!(settings.transcription.compute_device, "gpu");
+        assert!(settings.transcription.enabled);
+        assert!(!settings.diarization.enabled);
+        assert_eq!(settings.diarization.engine, "nemo");
+        assert_eq!(settings.diarization.min_speakers, Some(2));
+        assert_eq!(settings.diarization.max_speakers, Some(4));
+        assert_eq!(settings.export.format, "mkv");
+        assert_eq!(settings.export.video_quality, "Отличное (CRF 18)");
+        assert_eq!(settings.export.audio_mode, "Без пережатия");
+        assert_eq!(settings.models_dir, "/tmp/legacy/models");
+        assert_eq!(settings.output_dir, "/tmp/output");
+    }
+
+    /// Проверяет, что v4-настройки не считаются legacy.
+    #[test]
+    fn ignores_v4_settings() {
+        let raw = serde_json::to_string(&Settings::default()).expect("json");
+        assert!(migrate_legacy_settings(&raw).expect("migration").is_none());
+    }
+
+    /// Проверяет миграцию старых подписей качества и звука.
+    #[test]
+    fn migrates_legacy_labels() {
+        let raw = r#"{
+            "transcription_engine": "vosk",
+            "diarization_method": "diarize",
+            "video_quality": "Сильное сжатие (CRF 35) - маленький файл",
+            "audio_track_mode": "Удалить звук (только видео)"
+        }"#;
+        let settings = migrate_legacy_settings(raw)
+            .expect("migration")
+            .expect("legacy settings");
+        assert_eq!(settings.diarization.engine, "sherpa-onnx");
+        assert_eq!(settings.export.video_quality, "Сильное сжатие (CRF 35)");
+        assert_eq!(settings.export.audio_mode, "Без звука");
+        assert_eq!(settings.export.format, "mp4");
+    }
+
+    /// Проверяет миграцию файла через хранилище.
+    #[test]
+    fn store_migrates_from_legacy_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let legacy = dir.path().join("legacy.json");
+        std::fs::write(
+            &legacy,
+            r#"{"transcription_engine":"whisper","output_format":"mkv"}"#,
+        )
+        .expect("legacy");
+        let store = SettingsStore::new(dir.path().join("v4/settings.json"));
+        let settings = store
+            .load_or_create_migrating(&[legacy])
+            .expect("migration");
+        assert_eq!(settings.export.format, "mkv");
+        assert!(store.path().is_file());
     }
 
     /// Проверяет сохранение пользовательских путей и устройства.

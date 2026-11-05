@@ -160,6 +160,7 @@ pub struct ScreenRecorderApp {
     client: Option<ipc::Client>,
     last_daemon_poll: Instant,
     last_history_refresh: Instant,
+    last_state_log: Instant,
     daemon_lost_at: Option<Instant>,
     recording_elapsed: u64,
     preflight_active: bool,
@@ -320,6 +321,7 @@ impl ScreenRecorderApp {
             client,
             last_daemon_poll: Instant::now(),
             last_history_refresh: Instant::now(),
+            last_state_log: Instant::now(),
             daemon_lost_at: None,
             recording_elapsed: 0,
             preflight_active: false,
@@ -584,6 +586,7 @@ impl ScreenRecorderApp {
             return;
         }
         self.ui_launching_until = Some(Instant::now() + Duration::from_secs(3));
+        tracing::info!("запуск окна из трея");
         if let Err(error) = self.spawn_ui() {
             self.log = format!("Не удалось открыть окно: {error}");
         }
@@ -1217,7 +1220,14 @@ impl ScreenRecorderApp {
             Ok(_) => audibly_ok = true,
             Err(error) => warnings.push(format!("системный звук: {error}")),
         }
+        tracing::info!(
+            mic = ?result.mic,
+            system = ?result.system,
+            warnings = ?warnings,
+            "preflight звука"
+        );
         if matches!(start, PendingStart::AudioOnly) && !audibly_ok {
+            tracing::warn!("аудиозапись не начата: нет сигнала");
             self.preflight_warnings.clear();
             self.status = "Звук не обнаружен".to_string();
             self.log = format!("Запись не начата: {}", warnings.join("; "));
@@ -1244,6 +1254,7 @@ impl ScreenRecorderApp {
 
     /// Запускает запись только звука.
     fn start_audio_only(&mut self) {
+        tracing::info!("старт аудиозаписи");
         let session_id = SessionId::new();
         let session_dir = self.paths.session_dir(session_id.as_str());
         if let Err(error) = std::fs::create_dir_all(&session_dir) {
@@ -1272,6 +1283,7 @@ impl ScreenRecorderApp {
 
     /// Запускает запись всего экрана.
     fn start_full_screen(&mut self) {
+        tracing::info!("старт записи всего экрана");
         self.audio_only = false;
         self.recording_mode = None;
         let session_id = SessionId::new();
@@ -1378,6 +1390,14 @@ impl ScreenRecorderApp {
             mic_device.as_deref(),
         ) {
             Ok(audio) => {
+                tracing::info!(
+                    system = ?system_device,
+                    mic = ?mic_device,
+                    system_started = audio.system,
+                    mic_started = audio.mic,
+                    warnings = ?audio.warnings,
+                    "аудиодорожки"
+                );
                 if audio.system {
                     self.add_manifest_track(
                         TrackKind::System,
@@ -1503,6 +1523,7 @@ impl ScreenRecorderApp {
 
     /// Запускает запись выбранной области.
     fn start_region_recording(&mut self, region: Region, mode: &'static str) {
+        tracing::info!(mode, ?region, "старт записи области");
         let session_id = SessionId::new();
         let session_dir = self.paths.session_dir(session_id.as_str());
         let output = session_dir.join("screen.mkv");
@@ -1637,6 +1658,7 @@ impl ScreenRecorderApp {
 
     /// Просит сервис остановить запись.
     fn send_stop(&mut self) {
+        tracing::info!("окно просит остановить запись");
         match self.send_request(&Request::Stop) {
             Ok(Response::Ok) => self.status = "Остановка записи…".to_string(),
             Ok(Response::Error { message }) | Err(message) => self.log = message,
@@ -1646,6 +1668,11 @@ impl ScreenRecorderApp {
 
     /// Просит сервис начать запись.
     fn send_start(&mut self, mode: RecordMode, region: Option<Region>) {
+        tracing::info!(
+            ?mode,
+            has_region = region.is_some(),
+            "окно просит начать запись"
+        );
         let request = Request::Start(StartRequest {
             mode,
             region: region.map(|region| RegionDto {
@@ -1676,6 +1703,12 @@ impl ScreenRecorderApp {
         if !self.recording {
             return;
         }
+        tracing::info!(
+            mode = ?self.recording_mode,
+            mic_dbfs = self.mic_dbfs,
+            system_dbfs = self.system_dbfs,
+            "остановка записи"
+        );
         let was_wayland_pending = self.wayland_pending;
         let was_wayland_active = self.using_wayland && self.wayland_recorder.is_running();
         self.recording = false;
@@ -1976,6 +2009,7 @@ impl ScreenRecorderApp {
         self.cancel_requested = false;
         let _ = std::fs::remove_file(session_dir.join("progress.json"));
         self.transcription_job = self.activate_job(queued, session_dir, "transcribe");
+        tracing::info!(dir = %session_dir.display(), "старт распознавания");
         self.status = "Распознавание речи…".to_string();
     }
 
@@ -2080,6 +2114,7 @@ impl ScreenRecorderApp {
         let job = self.transcription_job.take();
         self.finish_job(job, job_result);
         if was_cancelled {
+            tracing::info!("распознавание отменено");
             self.status = "Распознавание отменено".to_string();
             self.log = "Распознавание остановлено пользователем.".to_string();
             notify("Screen Recorder", "Распознавание отменено");
@@ -2087,6 +2122,7 @@ impl ScreenRecorderApp {
         }
         match result {
             Ok(output) => {
+                tracing::info!(segments = output.segments, language = %output.language, "распознавание завершено");
                 self.status = "Транскрипция готова".to_string();
                 notify("Screen Recorder", "Транскрипция готова");
                 self.log = format!(
@@ -2141,6 +2177,7 @@ impl ScreenRecorderApp {
                 }
             }
             Err(error) => {
+                tracing::error!(%error, "распознавание не удалось");
                 self.status = format!("Ошибка распознавания: {error}");
                 self.log = format!("ASR: {error}");
             }
@@ -2198,6 +2235,7 @@ impl ScreenRecorderApp {
         });
         self.export_rx = Some(receiver);
         self.exporting = true;
+        tracing::info!(output = %output.display(), "старт экспорта");
         self.status = "Экспорт записи...".to_string();
         self.log = format!("Экспорт: {}", output.display());
     }
@@ -2255,6 +2293,7 @@ impl ScreenRecorderApp {
         self.finish_job(job, job_result);
         match result {
             Ok(path) => {
+                tracing::info!(output = %path.display(), "экспорт завершён");
                 self.status = "Экспорт завершён".to_string();
                 self.log = format!("Готово: {}", path.display());
                 notify(
@@ -2275,6 +2314,7 @@ impl ScreenRecorderApp {
                 }
             }
             Err(error) => {
+                tracing::error!(%error, "экспорт не удался");
                 self.status = format!("Ошибка экспорта: {error}");
                 self.log = format!("Не удалось экспортировать запись: {error}");
             }
@@ -3615,6 +3655,24 @@ impl ScreenRecorderApp {
 
     /// Обслуживает запись, очередь и трей в фоновом сервисе.
     fn tick_daemon(&mut self) {
+        if self.last_state_log.elapsed() >= Duration::from_secs(60) {
+            self.last_state_log = Instant::now();
+            if self.recording || self.exporting || self.transcribing || !self.queued_jobs.is_empty()
+            {
+                tracing::info!(
+                    recording = self.recording,
+                    elapsed = self
+                        .recording_started_at
+                        .map(|started| started.elapsed().as_secs())
+                        .unwrap_or(0),
+                    transcribing = self.transcribing,
+                    exporting = self.exporting,
+                    queued = self.queued_jobs.len(),
+                    rss_mb = process_rss_mb().unwrap_or(0),
+                    "состояние сервиса"
+                );
+            }
+        }
         self.poll_recording();
         self.poll_preflight();
         self.poll_transcription();
@@ -3680,6 +3738,7 @@ impl ScreenRecorderApp {
     /// Помечает потерю сервиса и сбрасывает активные индикаторы.
     fn mark_daemon_lost(&mut self, reason: &str) {
         if self.daemon_lost_at.is_none() {
+            tracing::warn!(%reason, "потеряна связь с сервисом");
             self.daemon_lost_at = Some(Instant::now());
             self.status = "Фоновый сервис остановлен".to_string();
             self.log = reason.to_string();
@@ -3755,6 +3814,18 @@ impl eframe::App for ScreenRecorderApp {
         self.window_picker(ui.ctx());
         self.delete_window(ui.ctx());
     }
+}
+
+/// Возвращает RSS текущего процесса в мегабайтах (Linux).
+fn process_rss_mb() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(value) = line.strip_prefix("VmRSS:") {
+            let kb = value.split_whitespace().next()?.parse::<u64>().ok()?;
+            return Some(kb / 1024);
+        }
+    }
+    None
 }
 
 /// Проверяет, что приложение работает через Wayland.
@@ -4084,6 +4155,7 @@ fn configure_style(ctx: &egui::Context) {
 
 /// Запускает окно интерфейса, подключённое к фоновому сервису.
 pub fn run(paths: Paths, settings: Settings) -> Result<(), String> {
+    tracing::info!("подключение окна к сервису");
     let client = ipc::ensure_daemon(&paths)?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

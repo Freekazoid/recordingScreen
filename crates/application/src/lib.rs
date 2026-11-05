@@ -18,4 +18,7 @@ pub use ml_client::{
     DiarizeWorker, MlWorker, NemoWorker, SpeakerTurn, Transcript, TranscriptSegment,
     assign_speakers,
 };
-pub use settings::{DEFAULT_SETTINGS_JSON, SCHEMA_VERSION, Settings, SettingsError, SettingsStore};
+pub use settings::{
+    DEFAULT_SETTINGS_JSON, SCHEMA_VERSION, Settings, SettingsError, SettingsStore,
+    legacy_settings_candidates, migrate_legacy_settings,
+};
