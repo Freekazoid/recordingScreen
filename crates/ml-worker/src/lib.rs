@@ -29,6 +29,12 @@ struct AsrParams {
     language: Option<String>,
     #[serde(default)]
     timestamps: Option<bool>,
+    #[serde(default)]
+    compute_device: Option<String>,
+    #[serde(default)]
+    progress_stage: Option<String>,
+    #[serde(default)]
+    pass: Option<u8>,
 }
 
 /// Исходящий JSON-RPC-ответ.
@@ -149,17 +155,91 @@ impl Server {
         }
         let vad = self.models_dir.join("vad/ggml-silero-v5.1.2.bin");
         let vad = vad.is_file().then_some(vad);
-        let engine = self
+        let requested = params.compute_device.as_deref().unwrap_or("auto");
+        if requested == "gpu" && !cfg!(feature = "cuda") {
+            return RpcResponse::err(
+                id,
+                -32002,
+                "эта сборка без GPU; установите вариант с CUDA".to_string(),
+            );
+        }
+        let use_gpu = match requested {
+            "cpu" => false,
+            "gpu" => true,
+            _ => screenrecorder_ml::gpu_available(),
+        };
+        if self
             .asr
-            .get_or_insert_with(|| WhisperEngine::with_vad(&model, vad));
+            .as_ref()
+            .is_some_and(|engine| engine.uses_gpu() != use_gpu)
+        {
+            self.asr = None;
+        }
+        let progress_stage = params
+            .progress_stage
+            .clone()
+            .unwrap_or_else(|| "asr".to_string());
+        let pass = params.pass.unwrap_or(1);
+        let device = if use_gpu { "gpu" } else { "cpu" };
         let progress_path = params.audio_path.clone();
-        screenrecorder_ml::write_progress_file(&progress_path, "asr", 0);
-        match engine.transcribe_with_progress(
-            &params.audio_path,
-            params.language.as_deref(),
-            params.timestamps.unwrap_or(true),
-            move |percent| screenrecorder_ml::write_progress_file(&progress_path, "asr", percent),
-        ) {
+        screenrecorder_ml::write_progress_file_with_device(
+            &progress_path,
+            &progress_stage,
+            0,
+            pass,
+            device,
+        );
+        let mut result = {
+            let engine = self.asr.get_or_insert_with(|| {
+                WhisperEngine::with_vad_and_device(&model, vad.clone(), use_gpu)
+            });
+            engine.transcribe_with_progress(
+                &params.audio_path,
+                params.language.as_deref(),
+                params.timestamps.unwrap_or(true),
+                {
+                    let progress_path = progress_path.clone();
+                    let progress_stage = progress_stage.clone();
+                    move |percent| {
+                        screenrecorder_ml::write_progress_file_with_device(
+                            &progress_path,
+                            &progress_stage,
+                            percent,
+                            pass,
+                            device,
+                        )
+                    }
+                },
+            )
+        };
+        // AUTO: если CUDA не смог инициализироваться, повторяем на CPU.
+        if result.is_err() && use_gpu && requested == "auto" {
+            self.asr = None;
+            result = {
+                let engine = self
+                    .asr
+                    .get_or_insert_with(|| WhisperEngine::with_vad_and_device(&model, vad, false));
+                engine.transcribe_with_progress(
+                    &params.audio_path,
+                    params.language.as_deref(),
+                    params.timestamps.unwrap_or(true),
+                    {
+                        let progress_path = progress_path.clone();
+                        let progress_stage = progress_stage.clone();
+                        move |percent| {
+                            screenrecorder_ml::write_progress_file_with_device(
+                                &progress_path,
+                                &progress_stage,
+                                percent,
+                                pass,
+                                "cpu",
+                            )
+                        }
+                    },
+                )
+            };
+        }
+        match result {
             Ok(transcript) => match serde_json::to_value(transcript) {
                 Ok(value) => RpcResponse::ok(id, value),
                 Err(error) => RpcResponse::err(id, -32603, format!("сериализация: {error}")),

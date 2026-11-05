@@ -96,6 +96,9 @@ impl MlWorker {
         audio: &Path,
         language: Option<&str>,
         timestamps: bool,
+        compute_device: &str,
+        progress_stage: &str,
+        pass: u8,
     ) -> Result<Transcript, String> {
         let result = self.request(
             "asr.transcribe",
@@ -103,6 +106,9 @@ impl MlWorker {
                 "audio_path": audio,
                 "language": language,
                 "timestamps": timestamps,
+                "compute_device": compute_device,
+                "progress_stage": progress_stage,
+                "pass": pass,
             }),
         )?;
         serde_json::from_value(result).map_err(|error| format!("ответ ASR: {error}"))

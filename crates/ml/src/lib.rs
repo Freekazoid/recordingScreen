@@ -10,8 +10,10 @@ use thiserror::Error;
 pub mod audio;
 pub mod whisper;
 
-pub use whisper::WhisperEngine;
 pub use whisper::write_progress_file;
+pub use whisper::{
+    WhisperEngine, gpu_available, write_progress_file_with_device, write_progress_file_with_pass,
+};
 
 /// Ошибки ML-слоя.
 #[derive(Debug, Error)]

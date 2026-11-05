@@ -49,6 +49,8 @@ pub enum UiAction {
 pub struct ProgressDto {
     pub stage: String,
     pub percent: f32,
+    #[serde(default)]
+    pub device: Option<String>,
 }
 
 /// Снимок состояния для окна.

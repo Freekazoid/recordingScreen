@@ -21,3 +21,7 @@ screenrecorder-ui = { path = "../ui" }
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[features]
+default = []
+cuda = ["screenrecorder-ml-worker/cuda"]

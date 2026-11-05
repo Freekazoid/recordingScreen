@@ -12,18 +12,50 @@ use whisper_rs::{
 ///
 /// UI читает этот файл и показывает процент, а также PID для отмены.
 pub fn write_progress_file(audio: &Path, stage: &str, percent: u8) {
+    write_progress_file_with_pass(audio, stage, percent, 0);
+}
+
+/// Пишет прогресс с номером прохода Whisper (1 — system, 2 — mic).
+pub fn write_progress_file_with_pass(audio: &Path, stage: &str, percent: u8, pass: u8) {
+    write_progress_file_with_device(audio, stage, percent, pass, "");
+}
+
+/// Пишет прогресс с указанием фактического устройства (cpu/gpu).
+pub fn write_progress_file_with_device(
+    audio: &Path,
+    stage: &str,
+    percent: u8,
+    pass: u8,
+    device: &str,
+) {
     let Some(dir) = audio.parent() else {
         return;
     };
     let path = dir.join("progress.json");
     let temp = dir.join("progress.json.tmp");
     let data = format!(
-        r#"{{"stage":"{stage}","percent":{},"pid":{}}}"#,
+        r#"{{"stage":"{stage}","percent":{},"pid":{},"pass":{},"device":"{device}"}}"#,
         percent.min(100),
-        std::process::id()
+        std::process::id(),
+        pass
     );
     if std::fs::write(&temp, data).is_ok() {
         let _ = std::fs::rename(&temp, &path);
+    }
+}
+
+/// Проверяет, доступен ли CUDA-GPU в этой сборке и системе.
+pub fn gpu_available() -> bool {
+    if !cfg!(feature = "cuda") {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new("/dev/nvidia0").exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
     }
 }
 
@@ -33,6 +65,7 @@ pub struct WhisperEngine {
     vad_path: Option<PathBuf>,
     context: Option<WhisperContext>,
     threads: i32,
+    use_gpu: bool,
 }
 
 impl WhisperEngine {
@@ -43,6 +76,15 @@ impl WhisperEngine {
 
     /// Создаёт движок с опциональной моделью Silero VAD.
     pub fn with_vad(model_path: impl Into<PathBuf>, vad_path: Option<PathBuf>) -> Self {
+        Self::with_vad_and_device(model_path, vad_path, false)
+    }
+
+    /// Создаёт движок с выбором CPU/GPU.
+    pub fn with_vad_and_device(
+        model_path: impl Into<PathBuf>,
+        vad_path: Option<PathBuf>,
+        use_gpu: bool,
+    ) -> Self {
         let threads = std::thread::available_parallelism()
             .map(|count| count.get().min(8) as i32)
             .unwrap_or(4);
@@ -51,7 +93,13 @@ impl WhisperEngine {
             vad_path,
             context: None,
             threads,
+            use_gpu: use_gpu && cfg!(feature = "cuda"),
         }
+    }
+
+    /// Использует ли движок GPU.
+    pub fn uses_gpu(&self) -> bool {
+        self.use_gpu
     }
 
     /// Проверяет, что файл модели существует.
@@ -166,14 +214,14 @@ impl WhisperEngine {
     fn context(&mut self) -> Result<&WhisperContext, MlError> {
         if self.context.is_none() {
             let path = self.model_path.to_string_lossy().to_string();
-            let context =
-                WhisperContext::new_with_params(&path, WhisperContextParameters::default())
-                    .map_err(|error| {
-                        MlError::Inference(format!(
-                            "загрузка модели {}: {error}",
-                            self.model_path.display()
-                        ))
-                    })?;
+            let mut params = WhisperContextParameters::default();
+            params.use_gpu(self.use_gpu);
+            let context = WhisperContext::new_with_params(&path, params).map_err(|error| {
+                MlError::Inference(format!(
+                    "загрузка модели {}: {error}",
+                    self.model_path.display()
+                ))
+            })?;
             self.context = Some(context);
         }
         self.context

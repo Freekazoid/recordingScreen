@@ -11,3 +11,7 @@ hound.workspace = true
 whisper-rs.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[features]
+default = []
+cuda = ["whisper-rs/cuda"]

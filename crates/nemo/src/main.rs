@@ -91,7 +91,7 @@ fn write_progress(audio: &std::path::Path, stage: &str, percent: u8) {
     let path = dir.join("progress.json");
     let temp = dir.join("progress.json.tmp");
     let data = format!(
-        r#"{{"stage":"{stage}","percent":{},"pid":{}}}"#,
+        r#"{{"stage":"{stage}","percent":{},"pid":{},"pass":0}}"#,
         percent.min(100),
         std::process::id()
     );

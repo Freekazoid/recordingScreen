@@ -56,6 +56,8 @@ struct ProgressInfo {
     stage: String,
     percent: f32,
     pid: u32,
+    pass: u8,
+    device: String,
 }
 
 /// Результат фоновой остановки записи.
@@ -203,6 +205,8 @@ pub struct ScreenRecorderApp {
     transcript_rx: Option<Receiver<Result<TranscriptOutput, String>>>,
     transcribing: bool,
     ml_progress: Option<ProgressInfo>,
+    ml_asr_passes: u8,
+    ml_total_phases: u8,
     last_progress_poll: Instant,
     cancel_requested: bool,
     history: HistoryStore,
@@ -367,6 +371,8 @@ impl ScreenRecorderApp {
             transcript_rx: None,
             transcribing: false,
             ml_progress: None,
+            ml_asr_passes: 1,
+            ml_total_phases: 1,
             last_progress_poll: Instant::now(),
             cancel_requested: false,
             history,
@@ -2013,10 +2019,16 @@ impl ScreenRecorderApp {
             PathBuf::from(self.settings.models_dir.trim())
         };
         let language = self.settings.transcription.language.clone();
+        let compute_device = self.settings.transcription.compute_device.clone();
         let diarization_enabled = self.settings.diarization.enabled;
         let diarization_engine = self.settings.diarization.engine.clone();
         let min_speakers = self.settings.diarization.min_speakers;
         let max_speakers = self.settings.diarization.max_speakers;
+        let asr_passes = if has_mic && has_system { 2 } else { 1 };
+        let diarization_phase = diarization_enabled && has_system;
+        let total_phases = asr_passes + u8::from(diarization_phase);
+        self.ml_asr_passes = asr_passes;
+        self.ml_total_phases = total_phases;
         let dir = session_dir.to_path_buf();
         self.log = "ASR: подготовка аудио и запуск воркера…".to_string();
         let (sender, receiver) = mpsc::channel();
@@ -2027,9 +2039,22 @@ impl ScreenRecorderApp {
                 let transcript = if has_mic && has_system {
                     // Channel-aware: system и mic транскрибируются отдельно,
                     // затем сегменты сливаются по времени.
-                    let mut system_transcript =
-                        worker.transcribe(&system, Some(&language), true)?;
-                    let mut mic_transcript = worker.transcribe(&mic, Some(&language), true)?;
+                    let mut system_transcript = worker.transcribe(
+                        &system,
+                        Some(&language),
+                        true,
+                        &compute_device,
+                        "asr:system",
+                        1,
+                    )?;
+                    let mut mic_transcript = worker.transcribe(
+                        &mic,
+                        Some(&language),
+                        true,
+                        &compute_device,
+                        "asr:mic",
+                        2,
+                    )?;
                     for segment in &mut mic_transcript.segments {
                         segment.speaker = Some("Микрофон".to_string());
                     }
@@ -2060,9 +2085,36 @@ impl ScreenRecorderApp {
                     } else {
                         (system, "Система")
                     };
-                    let mut transcript = worker.transcribe(&audio, Some(&language), true)?;
-                    for segment in &mut transcript.segments {
-                        segment.speaker = Some(label.to_string());
+                    let mut transcript = worker.transcribe(
+                        &audio,
+                        Some(&language),
+                        true,
+                        &compute_device,
+                        if has_mic { "asr:mic" } else { "asr:system" },
+                        1,
+                    )?;
+                    let mut diarized = false;
+                    if !has_mic && diarization_enabled {
+                        let turns = if diarization_engine == "nemo" {
+                            NemoWorker::spawn(&models_dir)
+                                .and_then(|mut worker| worker.diarize(&audio))
+                        } else {
+                            DiarizeWorker::spawn(&models_dir).and_then(|mut worker| {
+                                worker.diarize(&audio, min_speakers, max_speakers)
+                            })
+                        };
+                        match turns {
+                            Ok(turns) => {
+                                assign_speakers(&mut transcript, &turns);
+                                diarized = true;
+                            }
+                            Err(error) => warning = Some(format!("диаризация: {error}")),
+                        }
+                    }
+                    if !diarized {
+                        for segment in &mut transcript.segments {
+                            segment.speaker = Some(label.to_string());
+                        }
                     }
                     transcript
                 };
@@ -2118,8 +2170,12 @@ impl ScreenRecorderApp {
             return;
         }
         self.last_progress_poll = Instant::now();
-        if let Some(dir) = &self.session_dir {
-            self.ml_progress = read_progress(&dir.join("progress.json"));
+        if let Some(dir) = &self.session_dir
+            && let Some(mut progress) = read_progress(&dir.join("progress.json"))
+        {
+            progress.percent =
+                overall_progress(&progress, self.ml_asr_passes, self.ml_total_phases);
+            self.ml_progress = Some(progress);
         }
     }
 
@@ -2980,14 +3036,21 @@ impl ScreenRecorderApp {
             ui.add_space(2.0);
             if let Some(progress) = self.ml_progress.as_ref().filter(|_| self.transcribing) {
                 let stage = match progress.stage.as_str() {
+                    "asr:system" => "Whisper · система",
+                    "asr:mic" => "Whisper · микрофон",
                     "asr" => "Whisper",
                     "diarization" => "Диаризация",
                     _ => "Обработка",
                 };
+                let device = match progress.device.as_str() {
+                    "gpu" => " · GPU",
+                    "cpu" => " · CPU",
+                    _ => "",
+                };
                 ui.add(
                     egui::ProgressBar::new((progress.percent / 100.0).clamp(0.0, 1.0))
                         .desired_width(ui.available_width())
-                        .text(format!("{stage} · {:.0}%", progress.percent)),
+                        .text(format!("{stage}{device} · {:.0}%", progress.percent)),
                 );
             } else {
                 ui.add(
@@ -3081,7 +3144,7 @@ impl ScreenRecorderApp {
             };
             return (
                 "Распознавание",
-                format!("Whisper распознаёт речь, затем спикеры через {engine}."),
+                format!("Whisper распознаёт дорожки по очереди, затем спикеры через {engine}."),
                 true,
                 false,
             );
@@ -3670,6 +3733,7 @@ impl ScreenRecorderApp {
             ml_progress: self.ml_progress.as_ref().map(|progress| ProgressDto {
                 stage: progress.stage.clone(),
                 percent: progress.percent,
+                device: (!progress.device.is_empty()).then(|| progress.device.clone()),
             }),
             queued_jobs: self.queued_jobs.len(),
             show_requested: self.show_requested,
@@ -3882,6 +3946,8 @@ impl ScreenRecorderApp {
             stage: progress.stage,
             percent: progress.percent,
             pid: 0,
+            pass: 0,
+            device: progress.device.unwrap_or_default(),
         });
         self.queued_jobs_count = snapshot.queued_jobs;
         self.show_requested = snapshot.show_requested;
@@ -3982,6 +4048,17 @@ fn tray_label(text: &str, keys: &str) -> String {
     }
 }
 
+/// Переводит прогресс отдельного прохода в общий прогресс обработки.
+fn overall_progress(progress: &ProgressInfo, asr_passes: u8, total_phases: u8) -> f32 {
+    let total = total_phases.max(1) as f32;
+    let phase = if progress.stage == "diarization" {
+        asr_passes as f32
+    } else {
+        progress.pass.saturating_sub(1) as f32
+    };
+    ((phase + progress.percent / 100.0) / total * 100.0).clamp(0.0, 100.0)
+}
+
 /// Читает progress.json ML-воркера.
 fn read_progress(path: &Path) -> Option<ProgressInfo> {
     let text = std::fs::read_to_string(path).ok()?;
@@ -3990,6 +4067,15 @@ fn read_progress(path: &Path) -> Option<ProgressInfo> {
         stage: value.get("stage")?.as_str()?.to_string(),
         percent: value.get("percent")?.as_f64()? as f32,
         pid: value.get("pid")?.as_u64()? as u32,
+        pass: value
+            .get("pass")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u8,
+        device: value
+            .get("device")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
     })
 }
 
@@ -4325,6 +4411,21 @@ mod tests {
         let text = format_markdown(&sample());
         assert!(text.starts_with("# Транскрипт"));
         assert!(text.contains("**спикер_1** привет"));
+    }
+
+    /// Проверяет общий прогресс двух проходов ASR и диаризации.
+    #[test]
+    fn calculates_overall_progress() {
+        let info = |stage: &str, percent: f32, pass: u8| ProgressInfo {
+            stage: stage.to_string(),
+            percent,
+            pid: 1,
+            pass,
+            device: "cpu".to_string(),
+        };
+        assert!((overall_progress(&info("asr:system", 50.0, 1), 2, 3) - 16.67).abs() < 0.1);
+        assert!((overall_progress(&info("asr:mic", 50.0, 2), 2, 3) - 50.0).abs() < 0.1);
+        assert!((overall_progress(&info("diarization", 50.0, 0), 2, 3) - 83.33).abs() < 0.1);
     }
 
     /// Проверяет разбор области.
