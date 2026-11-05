@@ -1763,7 +1763,10 @@ impl ScreenRecorderApp {
         let (sender, receiver) = mpsc::channel();
         self.stop_rx = Some(receiver);
         std::thread::spawn(move || {
+            let audio_started = Instant::now();
             let audio_result = audio_recorder.stop().map_err(|error| error.to_string());
+            let audio_ms = audio_started.elapsed().as_millis();
+            let video_started = Instant::now();
             let video_result: Result<(), String> = if audio_only {
                 Ok(())
             } else if using_wayland {
@@ -1776,9 +1779,12 @@ impl ScreenRecorderApp {
             } else {
                 recorder.stop().map_err(|error| error.to_string())
             };
+            let video_ms = video_started.elapsed().as_millis();
             tracing::info!(
                 audio = ?audio_result,
                 video = ?video_result,
+                audio_ms,
+                video_ms,
                 "фоновые процессы остановки завершены"
             );
             let _ = sender.send(StopOutcome {
