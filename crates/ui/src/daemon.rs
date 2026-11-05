@@ -4,9 +4,9 @@
 //! подключается к нему через Unix-сокет, отображает снимок состояния и
 //! отправляет команды. Закрытие окна не останавливает запись.
 
-use crate::ScreenRecorderApp;
 use crate::ipc;
-use crate::protocol::{PROTOCOL_VERSION, Request, Response};
+use crate::protocol::{HotkeyAction, PROTOCOL_VERSION, Request, Response};
+use crate::{ScreenRecorderApp, TrayCommand};
 use screenrecorder_adapters::Paths;
 use screenrecorder_application::Settings;
 use std::io::{BufRead, BufReader, Write};
@@ -227,6 +227,18 @@ fn handle_request(app: &mut ScreenRecorderApp, request: Request) -> Response {
         }
         Request::AckAction => {
             app.ui_action = None;
+            Response::Ok
+        }
+        Request::Hotkey { action } => {
+            let command = match action {
+                HotkeyAction::FullScreen => TrayCommand::FullScreen,
+                HotkeyAction::Area => TrayCommand::Area,
+                HotkeyAction::Program => TrayCommand::Program,
+                HotkeyAction::AudioOnly => TrayCommand::AudioOnly,
+                HotkeyAction::Stop => TrayCommand::Stop,
+                HotkeyAction::Show => TrayCommand::Show,
+            };
+            app.execute_tray_command(command);
             Response::Ok
         }
         Request::HotkeyParent { xid } => {

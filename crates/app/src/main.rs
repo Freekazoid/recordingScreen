@@ -72,6 +72,8 @@ fn main() -> anyhow::Result<()> {
         "area-selector"
     } else if args.iter().any(|arg| arg == "--diagnose") {
         "diagnose"
+    } else if args.iter().any(|arg| arg == "--hotkey") {
+        "hotkey"
     } else {
         "ui"
     };
@@ -91,6 +93,13 @@ fn main() -> anyhow::Result<()> {
     }
     if args.iter().any(|arg| arg == "--diagnose") {
         return print_diagnostics(&paths);
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "--hotkey") {
+        let action = args
+            .get(index + 1)
+            .context("--hotkey: не указано действие")?;
+        return screenrecorder_ui::send_hotkey(paths, action)
+            .map_err(|error| anyhow::anyhow!("горячая клавиша: {error}"));
     }
 
     let settings = load_settings(&paths)?;

@@ -25,7 +25,8 @@ use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
 };
 use protocol::{
-    ProgressDto, RecordMode, RegionDto, Request, Response, Snapshot, StartRequest, UiAction,
+    HotkeyAction, ProgressDto, RecordMode, RegionDto, Request, Response, Snapshot, StartRequest,
+    UiAction,
 };
 use screenrecorder_adapters::{
     AudioDevice, AudioDeviceKind, AudioProbe, DownloadProgress, ExportRequest, LinuxAudioRecorder,
@@ -3826,6 +3827,45 @@ impl ScreenRecorderApp {
                 }
 
                 ui.add_space(6.0);
+                let executable = std::env::current_exe()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| "screenrecorder".to_string());
+                Self::section(
+                    ui,
+                    "Глобальные горячие клавиши",
+                    |ui| {
+                        ui.label(
+                            RichText::new(
+                                "На Wayland добавьте эти команды в «Настройки → Клавиатура → \
+                             Собственные сочетания». На X11 приложение регистрирует \
+                             Ctrl+Shift+1…5 само.",
+                            )
+                            .size(11.0)
+                            .color(HINT),
+                        );
+                        ui.add_space(4.0);
+                        for (keys, name, action) in [
+                            ("Ctrl+Shift+1", "Весь экран", "fullscreen"),
+                            ("Ctrl+Shift+2", "Область экрана", "area"),
+                            ("Ctrl+Shift+3", "Программа", "program"),
+                            ("Ctrl+Shift+4", "Только аудио", "audio_only"),
+                            ("Ctrl+Shift+5", "Остановить запись", "stop"),
+                        ] {
+                            let command = format!("{executable} --hotkey {action}");
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(keys).monospace().color(TEXT));
+                                ui.label(RichText::new(name).size(11.0).color(TEXT));
+                                if ui.small_button("Скопировать").clicked() {
+                                    ui.ctx().copy_text(command.clone());
+                                }
+                            });
+                            ui.label(RichText::new(command).monospace().size(10.0).color(LINK));
+                            ui.add_space(3.0);
+                        }
+                    },
+                );
+
+                ui.add_space(6.0);
                 ui.label(
                     RichText::new("Изменения сохраняются автоматически")
                         .size(11.0)
@@ -4703,6 +4743,35 @@ fn x11_socket_available() -> bool {
     Path::new(&format!("/tmp/.X11-unix/X{number}")).exists()
 }
 
+/// Отправляет глобальную команду фоновому сервису.
+///
+/// Используется системными сочетаниями клавиш:
+/// `screenrecorder --hotkey stop` и т.п. Окно не требуется.
+pub fn send_hotkey(paths: Paths, action: &str) -> Result<(), String> {
+    let action = parse_hotkey_action(action)
+        .ok_or_else(|| format!("неизвестное действие горячей клавиши: {action}"))?;
+    let spawn = !matches!(action, HotkeyAction::Stop | HotkeyAction::Show);
+    let mut client = ipc::connect_for_command(&paths, spawn)?;
+    match client.request(&Request::Hotkey { action })? {
+        Response::Ok => Ok(()),
+        Response::Error { message } => Err(message),
+        _ => Err("неожиданный ответ сервиса".to_string()),
+    }
+}
+
+/// Разбирает действие из аргумента `--hotkey`.
+fn parse_hotkey_action(value: &str) -> Option<HotkeyAction> {
+    match value {
+        "fullscreen" | "full_screen" | "screen" => Some(HotkeyAction::FullScreen),
+        "area" => Some(HotkeyAction::Area),
+        "program" | "window" => Some(HotkeyAction::Program),
+        "audio_only" | "audio-only" | "audio" => Some(HotkeyAction::AudioOnly),
+        "stop" => Some(HotkeyAction::Stop),
+        "show" => Some(HotkeyAction::Show),
+        _ => None,
+    }
+}
+
 /// Запускает окно интерфейса, подключённое к фоновому сервису.
 pub fn run(paths: Paths, settings: Settings) -> Result<(), String> {
     tracing::info!("подключение окна к сервису");
@@ -4803,6 +4872,23 @@ mod tests {
         shift_transcript(&mut transcript, -10_000);
         assert_eq!(transcript.segments[0].start_ms, 0);
         assert_eq!(transcript.segments[0].end_ms, 0);
+    }
+
+    /// Проверяет разбор команд глобальных горячих клавиш.
+    #[test]
+    fn parses_hotkey_actions() {
+        assert_eq!(
+            parse_hotkey_action("fullscreen"),
+            Some(HotkeyAction::FullScreen)
+        );
+        assert_eq!(parse_hotkey_action("area"), Some(HotkeyAction::Area));
+        assert_eq!(parse_hotkey_action("program"), Some(HotkeyAction::Program));
+        assert_eq!(
+            parse_hotkey_action("audio_only"),
+            Some(HotkeyAction::AudioOnly)
+        );
+        assert_eq!(parse_hotkey_action("stop"), Some(HotkeyAction::Stop));
+        assert_eq!(parse_hotkey_action("unknown"), None);
     }
 
     /// Проверяет приоритет X11 и запасной Wayland.

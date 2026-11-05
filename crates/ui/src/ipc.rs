@@ -153,3 +153,32 @@ pub fn ensure_daemon(paths: &Paths) -> Result<Client, String> {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+/// Подключается к сервису для разовой команды, без регистрации окна.
+///
+/// `spawn` разрешает запустить сервис, если он ещё не работает. Для
+/// `stop`/`show` это не нужно: команда должна действовать на уже живой
+/// сервис, а не создавать новый.
+pub fn connect_for_command(paths: &Paths, spawn: bool) -> Result<Client, String> {
+    let path = socket_path(paths);
+    ensure_socket_dir(&path)?;
+    if let Ok(client) = Client::connect(&path) {
+        return Ok(client);
+    }
+    if !spawn {
+        return Err("фоновый сервис не запущен".to_string());
+    }
+    spawn_daemon(paths)?;
+    let started = Instant::now();
+    loop {
+        match Client::connect(&path) {
+            Ok(client) => return Ok(client),
+            Err(error) => {
+                if started.elapsed() > Duration::from_secs(10) {
+                    return Err(format!("фоновый сервис не запустился: {error}"));
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}

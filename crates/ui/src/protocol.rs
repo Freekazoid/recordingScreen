@@ -44,6 +44,18 @@ pub enum UiAction {
     Program,
 }
 
+/// Глобальная команда, которую можно вызвать из системы.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HotkeyAction {
+    FullScreen,
+    Area,
+    Program,
+    AudioOnly,
+    Stop,
+    Show,
+}
+
 /// Прогресс ML-задачи.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgressDto {
@@ -99,6 +111,8 @@ pub enum Request {
     AckShow,
     /// Подтвердить, что окно обработало действие (область/программа).
     AckAction,
+    /// Выполнить глобальную команду (из системного сочетания клавиш).
+    Hotkey { action: HotkeyAction },
     /// Передать X11-идентификатор окна для родителя диалога портала.
     HotkeyParent { xid: u64 },
     /// Показать окно (если оно уже открыто).
