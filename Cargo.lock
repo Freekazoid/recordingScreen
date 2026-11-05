@@ -4382,6 +4382,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "tray-icon",
+ "uuid",
  "winit",
  "x11rb",
 ]

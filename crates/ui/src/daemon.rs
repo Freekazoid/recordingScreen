@@ -10,8 +10,13 @@ use crate::{ScreenRecorderApp, TrayCommand};
 use screenrecorder_adapters::Paths;
 use screenrecorder_application::Settings;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(windows)]
+use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -26,18 +31,26 @@ enum Event {
 
 /// Запускает фоновый сервис до завершения.
 pub fn run_daemon(paths: Paths, settings: Settings) -> Result<(), String> {
-    let socket = ipc::socket_path(&paths);
-    ipc::ensure_socket_dir(&socket)?;
-    let Some(listener) = bind_socket(&socket)? else {
+    let endpoint = ipc::socket_path(&paths);
+    ipc::ensure_socket_dir(&endpoint)?;
+    #[cfg(unix)]
+    let listener = bind_socket(&endpoint)?;
+    #[cfg(windows)]
+    let (listener, token) = bind_tcp(&endpoint)?;
+    let Some(listener) = listener else {
         tracing::info!("сервис уже запущен");
         return Ok(());
     };
-    tracing::info!(socket = %socket.display(), "сервис запущен");
+    tracing::info!(endpoint = %endpoint.display(), "сервис запущен");
 
     let (events_tx, events_rx) = mpsc::channel();
     spawn_accept(listener, events_tx);
 
     let mut app = ScreenRecorderApp::new_daemon(paths, settings);
+    #[cfg(windows)]
+    {
+        app.daemon_token = Some(token);
+    }
     let mut last_tick = Instant::now();
     let result = loop {
         drain_events(&mut app, &events_rx);
@@ -50,16 +63,17 @@ pub fn run_daemon(paths: Paths, settings: Settings) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&endpoint);
     tracing::info!("сервис остановлен");
     result
 }
 
-/// Создаёт сокет; `None`, если сервис уже обслуживает этот путь.
+/// Создаёт Unix-сокет; `None`, если сервис уже обслуживает этот путь.
 ///
 /// Stale-файл после `kill -9` удаляется: иначе новый сервис не смог бы
 /// занять адрес.
-fn bind_socket(socket: &std::path::Path) -> Result<Option<UnixListener>, String> {
+#[cfg(unix)]
+fn bind_socket(socket: &Path) -> Result<Option<UnixListener>, String> {
     if socket.exists() {
         if UnixStream::connect(socket).is_ok() {
             return Ok(None);
@@ -72,7 +86,35 @@ fn bind_socket(socket: &std::path::Path) -> Result<Option<UnixListener>, String>
     Ok(Some(listener))
 }
 
+/// Создаёт локальный TCP-listener и endpoint-файл с портом и токеном.
+#[cfg(windows)]
+fn bind_tcp(endpoint: &Path) -> Result<Option<(TcpListener, String)>, String> {
+    if endpoint.exists() {
+        if let Ok(raw) = std::fs::read_to_string(endpoint)
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw)
+            && let Some(port) = value.get("port").and_then(|value| value.as_u64())
+            && TcpStream::connect(("127.0.0.1", port as u16)).is_ok()
+        {
+            return Ok(None);
+        }
+        let _ = std::fs::remove_file(endpoint);
+    }
+    let listener =
+        TcpListener::bind(("127.0.0.1", 0)).map_err(|error| format!("локальный порт: {error}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| format!("локальный порт: {error}"))?
+        .port();
+    let token = uuid::Uuid::new_v4().to_string();
+    let body = serde_json::json!({"port": port, "token": token});
+    let raw = serde_json::to_vec(&body).map_err(|error| format!("endpoint: {error}"))?;
+    std::fs::write(endpoint, raw)
+        .map_err(|error| format!("endpoint {}: {error}", endpoint.display()))?;
+    Ok(Some((listener, token)))
+}
+
 /// Принимает клиентов в отдельном потоке.
+#[cfg(unix)]
 fn spawn_accept(listener: UnixListener, events: Sender<Event>) {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -85,8 +127,22 @@ fn spawn_accept(listener: UnixListener, events: Sender<Event>) {
     });
 }
 
+/// Принимает клиентов локального TCP-порта.
+#[cfg(windows)]
+fn spawn_accept(listener: TcpListener, events: Sender<Event>) {
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else {
+                continue;
+            };
+            let events = events.clone();
+            std::thread::spawn(move || handle_client(stream, events));
+        }
+    });
+}
+
 /// Обслуживает одно соединение окна.
-fn handle_client(stream: UnixStream, events: Sender<Event>) {
+fn handle_client(stream: ipc::Stream, events: Sender<Event>) {
     let Ok(reader_stream) = stream.try_clone() else {
         return;
     };
@@ -144,7 +200,7 @@ fn handle_client(stream: UnixStream, events: Sender<Event>) {
 }
 
 /// Пишет один JSON-ответ в сокет.
-fn write_response(writer: &mut UnixStream, response: &Response) -> std::io::Result<()> {
+fn write_response(writer: &mut impl Write, response: &Response) -> std::io::Result<()> {
     let line = serde_json::to_string(response).map_err(std::io::Error::other)?;
     writer.write_all(line.as_bytes())?;
     writer.write_all(b"\n")?;
@@ -175,8 +231,17 @@ fn drain_events(app: &mut ScreenRecorderApp, events: &Receiver<Event>) {
 /// Выполняет один запрос окна.
 fn handle_request(app: &mut ScreenRecorderApp, request: Request) -> Response {
     match request {
-        Request::Hello { version } => {
+        Request::Hello { version, token } => {
             if version != PROTOCOL_VERSION {
+                return Response::Hello {
+                    accepted: false,
+                    version: PROTOCOL_VERSION,
+                };
+            }
+            if let Some(expected) = &app.daemon_token
+                && token.as_deref() != Some(expected.as_str())
+            {
+                tracing::warn!("окно с неверным токеном отклонено");
                 return Response::Hello {
                     accepted: false,
                     version: PROTOCOL_VERSION,
@@ -259,7 +324,7 @@ fn handle_request(app: &mut ScreenRecorderApp, request: Request) -> Response {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

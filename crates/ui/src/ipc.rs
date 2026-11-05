@@ -1,28 +1,49 @@
 //! Транспорт между окном и фоновым сервисом.
 //!
-//! Linux-first: используется Unix-сокет в `XDG_RUNTIME_DIR` (или в каталоге
-//! данных приложения). Формат — по одному JSON-сообщению на строку.
+//! Linux: Unix-сокет в `XDG_RUNTIME_DIR` (или каталоге данных).
+//! Windows: локальный TCP-порт на 127.0.0.1, случайный порт и токен в
+//! пользовательском каталоге данных. Формат один для обеих платформ —
+//! по одному JSON-сообщению на строку.
 
 use crate::protocol::{PROTOCOL_VERSION, Request, Response};
 use screenrecorder_adapters::Paths;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Путь к сокету фонового сервиса.
+#[cfg(unix)]
+pub(crate) type Stream = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+pub(crate) type Stream = std::net::TcpStream;
+
+/// Данные локального endpoint'а Windows.
+#[cfg(windows)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct Endpoint {
+    port: u16,
+    token: String,
+}
+
+/// Путь к сокету/endpoint-файлу фонового сервиса.
 pub fn socket_path(paths: &Paths) -> PathBuf {
-    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime)
-            .join("screenrecorder")
-            .join("daemon.sock")
-    } else {
-        paths.data_dir.join("daemon.sock")
+    #[cfg(unix)]
+    {
+        if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
+            PathBuf::from(runtime)
+                .join("screenrecorder")
+                .join("daemon.sock")
+        } else {
+            paths.data_dir.join("daemon.sock")
+        }
+    }
+    #[cfg(windows)]
+    {
+        paths.data_dir.join("daemon.json")
     }
 }
 
-/// Создаёт каталог для сокета.
+/// Создаёт каталог для сокета/endpoint-файла.
 pub fn ensure_socket_dir(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -33,15 +54,30 @@ pub fn ensure_socket_dir(path: &Path) -> Result<(), String> {
 
 /// Подключение к сервису.
 pub struct Client {
-    writer: UnixStream,
-    reader: BufReader<UnixStream>,
+    writer: Stream,
+    reader: BufReader<Stream>,
+    token: Option<String>,
 }
 
 impl Client {
     /// Подключается к уже запущенному сервису.
     pub fn connect(path: &Path) -> Result<Self, String> {
-        let stream = UnixStream::connect(path)
-            .map_err(|error| format!("сокет {}: {error}", path.display()))?;
+        #[cfg(unix)]
+        let (stream, token) = {
+            let stream = Stream::connect(path)
+                .map_err(|error| format!("сокет {}: {error}", path.display()))?;
+            (stream, None)
+        };
+        #[cfg(windows)]
+        let (stream, token) = {
+            let raw = std::fs::read_to_string(path)
+                .map_err(|error| format!("endpoint {}: {error}", path.display()))?;
+            let endpoint: Endpoint = serde_json::from_str(&raw)
+                .map_err(|error| format!("endpoint {}: {error}", path.display()))?;
+            let stream = Stream::connect(("127.0.0.1", endpoint.port))
+                .map_err(|error| format!("порт {}: {error}", endpoint.port))?;
+            (stream, Some(endpoint.token))
+        };
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .map_err(|error| format!("таймаут сокета: {error}"))?;
@@ -51,6 +87,7 @@ impl Client {
         Ok(Self {
             writer: stream,
             reader: BufReader::new(reader_stream),
+            token,
         })
     }
 
@@ -77,6 +114,7 @@ impl Client {
     pub fn hello(&mut self) -> Result<bool, String> {
         match self.request(&Request::Hello {
             version: PROTOCOL_VERSION,
+            token: self.token.clone(),
         })? {
             Response::Hello { accepted, version } => {
                 if version != PROTOCOL_VERSION {
@@ -103,11 +141,18 @@ pub fn spawn_daemon(paths: &Paths) -> Result<(), String> {
         .append(true)
         .open(paths.log_dir.join("daemon.log"))
         .map_err(|error| format!("лог сервиса: {error}"))?;
-    let mut child = Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .arg("--daemon")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::from(log))
+        .stderr(Stdio::from(log));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| format!("запуск сервиса: {error}"))?;
     std::thread::spawn(move || {

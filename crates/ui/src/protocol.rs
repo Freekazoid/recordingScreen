@@ -7,7 +7,7 @@ use screenrecorder_application::Settings;
 use serde::{Deserialize, Serialize};
 
 /// Версия протокола. Несовпадение версий требует перезапуска сервиса.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Прямоугольник области в физических пикселях.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,7 +94,15 @@ pub struct Snapshot {
 #[serde(tag = "request", rename_all = "snake_case")]
 pub enum Request {
     /// Регистрация окна и проверка версии протокола.
-    Hello { version: u32 },
+    ///
+    /// `token` используется на Windows: TCP-порт доступен только локально,
+    /// а токен из пользовательского каталога подтверждает, что подключилось
+    /// именно наше окно.
+    Hello {
+        version: u32,
+        #[serde(default)]
+        token: Option<String>,
+    },
     /// Получить текущий снимок.
     Snapshot,
     /// Начать запись.
