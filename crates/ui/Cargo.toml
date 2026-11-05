@@ -9,7 +9,9 @@ license.workspace = true
 screenrecorder-adapters = { path = "../adapters" }
 screenrecorder-application = { path = "../application" }
 screenrecorder-domain = { path = "../domain" }
+ashpd.workspace = true
 chrono.workspace = true
+futures-lite.workspace = true
 eframe.workspace = true
 egui_extras = { version = "0.37", features = ["image"] }
 global-hotkey.workspace = true

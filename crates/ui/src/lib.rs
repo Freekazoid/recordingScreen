@@ -7,6 +7,8 @@
 
 mod daemon;
 mod ipc;
+#[cfg(target_os = "linux")]
+mod portal_hotkeys;
 mod protocol;
 #[cfg(target_os = "linux")]
 mod x11_activation;
@@ -40,7 +42,7 @@ use screenrecorder_application::{
 use screenrecorder_domain::{SessionId, TrackKind, TrackStats, TrackStatus};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 use tray_icon::{
     TrayIcon, TrayIconBuilder,
@@ -240,10 +242,17 @@ pub struct ScreenRecorderApp {
     tray_status_item: Option<MenuItem>,
     tray_stop_item: Option<MenuItem>,
     tray_commands: Vec<(MenuId, TrayCommand)>,
+    tray_hotkey_items: Vec<(MenuItem, TrayCommand, &'static str)>,
     tray_recording_state: Option<bool>,
     last_tray_command: Option<(TrayCommand, Instant)>,
     hotkey_manager: Option<GlobalHotKeyManager>,
     hotkey_bindings: Vec<(u32, TrayCommand)>,
+    #[cfg(target_os = "linux")]
+    portal_hotkeys_rx: Option<Receiver<portal_hotkeys::PortalHotkeyEvent>>,
+    #[cfg(target_os = "linux")]
+    portal_parent_tx: Option<Sender<u64>>,
+    #[cfg(target_os = "linux")]
+    hotkey_parent_sent: bool,
 }
 
 impl ScreenRecorderApp {
@@ -417,10 +426,17 @@ impl ScreenRecorderApp {
             tray_status_item: None,
             tray_stop_item: None,
             tray_commands: Vec::new(),
+            tray_hotkey_items: Vec::new(),
             tray_recording_state: None,
             last_tray_command: None,
             hotkey_manager: None,
             hotkey_bindings: Vec::new(),
+            #[cfg(target_os = "linux")]
+            portal_hotkeys_rx: None,
+            #[cfg(target_os = "linux")]
+            portal_parent_tx: None,
+            #[cfg(target_os = "linux")]
+            hotkey_parent_sent: false,
         };
         if daemon {
             app.init_tray();
@@ -499,20 +515,24 @@ impl ScreenRecorderApp {
         let quit = MenuItem::new("Выход", true, None);
 
         let mut commands = Vec::new();
-        for (item, command) in [
-            (&full, TrayCommand::FullScreen),
-            (&area, TrayCommand::Area),
-            (&program, TrayCommand::Program),
-            (&audio, TrayCommand::AudioOnly),
-            (&stop, TrayCommand::Stop),
-            (&show, TrayCommand::Show),
-            (&quit, TrayCommand::Quit),
+        let mut hotkey_items = Vec::new();
+        for (item, command, name) in [
+            (&full, TrayCommand::FullScreen, "Весь экран"),
+            (&area, TrayCommand::Area, "Область экрана"),
+            (&program, TrayCommand::Program, "Программа"),
+            (&audio, TrayCommand::AudioOnly, "Только аудио"),
+            (&stop, TrayCommand::Stop, "Остановить запись"),
+            (&show, TrayCommand::Show, "Показать"),
+            (&quit, TrayCommand::Quit, "Выход"),
         ] {
             if menu.append(item).is_err() {
                 self.log = "Трей: не удалось собрать меню".to_string();
                 return;
             }
             commands.push((item.id().clone(), command));
+            if !matches!(command, TrayCommand::Show | TrayCommand::Quit) {
+                hotkey_items.push((item.clone(), command, name));
+            }
         }
         if menu.prepend(&status).is_err() {
             self.log = "Трей: не удалось добавить статус".to_string();
@@ -528,6 +548,7 @@ impl ScreenRecorderApp {
                 self.tray_status_item = Some(status);
                 self.tray_stop_item = Some(stop);
                 self.tray_commands = commands;
+                self.tray_hotkey_items = hotkey_items;
                 self.tray = Some(tray);
             }
             Err(error) => {
@@ -537,7 +558,36 @@ impl ScreenRecorderApp {
     }
 
     /// Регистрирует глобальные горячие клавиши для режимов записи.
+    ///
+    /// На Wayland сначала пробуем портал: X11-захват не видит нативные
+    /// приложения. Если портал недоступен, остаётся X11-fallback.
     fn init_hotkeys(&mut self) {
+        // X11-сочетания оставляем как немедленный fallback. Портал на
+        // Wayland добавляет глобальные сочетания поверх; дубли гасятся
+        // дебаунсом в `execute_tray_command`.
+        self.init_x11_hotkeys();
+        #[cfg(target_os = "linux")]
+        if is_wayland() && std::env::var_os("SCREENRECORDER_PORTAL_HOTKEYS").is_some() {
+            let (parent_tx, parent_rx) = mpsc::channel();
+            match portal_hotkeys::spawn(parent_rx) {
+                Ok(receiver) => {
+                    tracing::info!("глобальные клавиши: XDG-портал");
+                    self.portal_hotkeys_rx = Some(receiver);
+                    self.portal_parent_tx = Some(parent_tx);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "портал глобальных клавиш не запущен");
+                    self.log = format!("Глобальные клавиши: {error}");
+                }
+            }
+        }
+    }
+
+    /// Регистрирует X11-горячие клавиши (fallback).
+    fn init_x11_hotkeys(&mut self) {
+        if self.hotkey_manager.is_some() {
+            return;
+        }
         let manager = match GlobalHotKeyManager::new() {
             Ok(manager) => manager,
             Err(error) => {
@@ -565,6 +615,28 @@ impl ScreenRecorderApp {
         self.hotkey_bindings = registered;
     }
 
+    /// Обновляет подписи трея фактическими сочетаниями из портала.
+    #[cfg(target_os = "linux")]
+    fn apply_portal_shortcuts(&mut self, shortcuts: &[(String, String)]) {
+        for (id, description) in shortcuts {
+            let Some(command) = portal_command(id) else {
+                continue;
+            };
+            let trigger = clean_trigger(description);
+            if trigger.is_empty() {
+                continue;
+            }
+            if let Some((item, _, name)) = self
+                .tray_hotkey_items
+                .iter()
+                .find(|(_, item_command, _)| *item_command == command)
+            {
+                item.set_text(tray_label(name, &trigger));
+            }
+        }
+        tracing::info!(?shortcuts, "глобальные клавиши привязаны через портал");
+    }
+
     /// Обрабатывает события трея.
     fn poll_tray(&mut self) {
         while let Ok(event) = MenuEvent::receiver().try_recv() {
@@ -581,6 +653,36 @@ impl ScreenRecorderApp {
 
     /// Обрабатывает глобальные горячие клавиши.
     fn poll_hotkeys(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            let events = self
+                .portal_hotkeys_rx
+                .as_ref()
+                .map(|receiver| {
+                    let mut events = Vec::new();
+                    while let Ok(event) = receiver.try_recv() {
+                        events.push(event);
+                    }
+                    events
+                })
+                .unwrap_or_default();
+            for event in events {
+                match event {
+                    portal_hotkeys::PortalHotkeyEvent::Bound(shortcuts) => {
+                        self.apply_portal_shortcuts(&shortcuts);
+                    }
+                    portal_hotkeys::PortalHotkeyEvent::Activated(command) => {
+                        self.execute_tray_command(command);
+                    }
+                    portal_hotkeys::PortalHotkeyEvent::Failed(error) => {
+                        tracing::warn!(%error, "глобальные клавиши через портал недоступны");
+                        self.log = format!("Глобальные клавиши: {error}");
+                        self.portal_hotkeys_rx = None;
+                        self.init_x11_hotkeys();
+                    }
+                }
+            }
+        }
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.state != global_hotkey::HotKeyState::Pressed {
                 continue;
@@ -3868,8 +3970,31 @@ impl ScreenRecorderApp {
         }
     }
 
+    /// Передаёт сервису X11-окно для родителя диалога портала.
+    #[cfg(target_os = "linux")]
+    fn send_hotkey_parent(&mut self) {
+        if self.hotkey_parent_sent || self.client.is_none() {
+            return;
+        }
+        if self.ui_backend != UiBackend::X11 {
+            self.hotkey_parent_sent = true;
+            return;
+        }
+        let Ok(Some(xid)) = x11_activation::window_id(std::process::id()) else {
+            return;
+        };
+        let request = Request::HotkeyParent { xid };
+        if let Some(client) = self.client.as_mut()
+            && client.request(&request).is_ok()
+        {
+            self.hotkey_parent_sent = true;
+        }
+    }
+
     /// Обновляет окно: снимок сервиса, загрузки, выбор области и настройки.
     fn tick_ui(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "linux")]
+        self.send_hotkey_parent();
         self.poll_daemon(ctx);
         self.poll_stop();
         self.refresh_history();
@@ -4163,6 +4288,42 @@ fn tray_label(text: &str, keys: &str) -> String {
         let _ = keys;
         text.to_string()
     }
+}
+
+/// Сопоставляет id сочетания из портала команде трея.
+#[cfg(target_os = "linux")]
+fn portal_command(id: &str) -> Option<TrayCommand> {
+    match id {
+        "fullscreen" => Some(TrayCommand::FullScreen),
+        "area" => Some(TrayCommand::Area),
+        "program" => Some(TrayCommand::Program),
+        "audio_only" => Some(TrayCommand::AudioOnly),
+        "stop" => Some(TrayCommand::Stop),
+        _ => None,
+    }
+}
+
+/// Приводит человекочитаемое описание портала к короткому сочетанию.
+///
+/// GNOME может вернуть «Нажмите <Control><Alt>s»; в трее показываем
+/// «Ctrl+Alt+s».
+#[cfg(target_os = "linux")]
+fn clean_trigger(description: &str) -> String {
+    let text = description.trim();
+    let text = text
+        .strip_prefix("Нажмите ")
+        .or_else(|| text.strip_prefix("Press "))
+        .unwrap_or(text)
+        .trim();
+    text.replace("<Control>", "Ctrl+")
+        .replace("<Ctrl>", "Ctrl+")
+        .replace("<Alt>", "Alt+")
+        .replace("<Shift>", "Shift+")
+        .replace("<Super>", "Super+")
+        .replace("<Logo>", "Super+")
+        .replace("<Meta>", "Meta+")
+        .trim()
+        .to_string()
 }
 
 /// Переводит прогресс отдельного прохода в общий прогресс обработки.

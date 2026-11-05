@@ -229,6 +229,12 @@ fn handle_request(app: &mut ScreenRecorderApp, request: Request) -> Response {
             app.ui_action = None;
             Response::Ok
         }
+        Request::HotkeyParent { xid } => {
+            if let Some(sender) = &app.portal_parent_tx {
+                let _ = sender.send(xid);
+            }
+            Response::Ok
+        }
         Request::ShowUi => {
             app.request_show_ui();
             Response::Ok

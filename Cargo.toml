@@ -22,13 +22,14 @@ authors = ["Freekazoid"]
 
 [workspace.dependencies]
 anyhow = "1"
-ashpd = { version = "0.13", default-features = false, features = ["screencast", "screenshot", "async-io"] }
+ashpd = { version = "0.13", default-features = false, features = ["screencast", "screenshot", "global_shortcuts", "async-io"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6"
 dirs = "6"
 eframe = "0.37"
 egui = "0.37"
 hound = "3"
+futures-lite = "2"
 image = { version = "0.25", default-features = false, features = ["png"] }
 libc = "0.2"
 rfd = "0.17"
