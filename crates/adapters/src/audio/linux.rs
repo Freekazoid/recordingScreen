@@ -317,6 +317,21 @@ fn resolve_target(target: Option<&str>, kind: AudioDeviceKind) -> Result<String,
     }
 }
 
+/// Просит ядро завершить дочерний `pw-record` вместе с сервисом.
+///
+/// Иначе после `kill -9` сервиса процессы записи остаются сиротами и
+/// продолжают писать в старую сессию, занимая устройства.
+fn die_with_parent(command: &mut std::process::Command) {
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
+}
+
 /// Собирает команду `pw-record` для указанного узла.
 ///
 /// Для системной дорожки включается `stream.capture.sink=true`:
@@ -342,6 +357,7 @@ fn pw_record_command(target: &str, output: &Path, channels: u32, capture_sink: b
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    die_with_parent(&mut command);
     command
 }
 

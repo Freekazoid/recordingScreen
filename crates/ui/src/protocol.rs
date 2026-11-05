@@ -7,7 +7,7 @@ use screenrecorder_application::Settings;
 use serde::{Deserialize, Serialize};
 
 /// Версия протокола. Несовпадение версий требует перезапуска сервиса.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Прямоугольник области в физических пикселях.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +57,7 @@ pub struct Snapshot {
     pub status: String,
     pub log: String,
     pub recording: bool,
+    pub stopping: bool,
     pub recording_mode: Option<String>,
     pub audio_only: bool,
     pub using_wayland: bool,

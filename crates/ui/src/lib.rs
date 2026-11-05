@@ -58,6 +58,15 @@ struct ProgressInfo {
     pid: u32,
 }
 
+/// Результат фоновой остановки записи.
+struct StopOutcome {
+    audio_result: Result<(), String>,
+    video_result: Result<(), String>,
+    audio_only: bool,
+    was_wayland_pending: bool,
+    was_wayland_active: bool,
+}
+
 /// Результат фонового распознавания.
 struct TranscriptOutput {
     text_path: PathBuf,
@@ -175,6 +184,9 @@ pub struct ScreenRecorderApp {
     probe_note: String,
     export_rx: Option<Receiver<Result<PathBuf, String>>>,
     exporting: bool,
+    stop_rx: Option<Receiver<StopOutcome>>,
+    stopping: bool,
+    quit_after_stop: bool,
     audio_offset_ms: i64,
     audio_only: bool,
     recording_mode: Option<&'static str>,
@@ -336,6 +348,9 @@ impl ScreenRecorderApp {
             probe_note: String::new(),
             export_rx: None,
             exporting: false,
+            stop_rx: None,
+            stopping: false,
+            quit_after_stop: false,
             audio_offset_ms: 0,
             audio_only: false,
             recording_mode: None,
@@ -548,8 +563,8 @@ impl ScreenRecorderApp {
             | TrayCommand::Area
             | TrayCommand::Program
             | TrayCommand::AudioOnly => {
-                if self.recording {
-                    self.log = "Сначала остановите текущую запись.".to_string();
+                if self.recording || self.stopping {
+                    self.log = "Сначала дождитесь остановки текущей записи.".to_string();
                     return;
                 }
                 if self.preflight_rx.is_some() {
@@ -586,6 +601,7 @@ impl ScreenRecorderApp {
             return;
         }
         self.ui_launching_until = Some(Instant::now() + Duration::from_secs(3));
+        self.show_requested = true;
         tracing::info!("запуск окна из трея");
         if let Err(error) = self.spawn_ui() {
             self.log = format!("Не удалось открыть окно: {error}");
@@ -605,20 +621,31 @@ impl ScreenRecorderApp {
     /// Запускает отдельный процесс окна.
     fn spawn_ui(&self) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|error| format!("исполняемый файл: {error}"))?;
-        Command::new(exe)
+        let mut child = Command::new(exe)
             .arg("--ui")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|error| format!("запуск окна: {error}"))?;
+        // Окно — отдельный процесс; обязательно пожинаем его, иначе
+        // после закрытия остаётся зомби.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         Ok(())
     }
 
     /// Останавливает запись и завершает сервис.
     fn request_quit(&mut self) {
+        if self.stopping {
+            self.quit_after_stop = true;
+            return;
+        }
         if self.recording {
+            self.quit_after_stop = true;
             self.stop_recording();
+            return;
         }
         self.quit_requested = true;
     }
@@ -635,6 +662,8 @@ impl ScreenRecorderApp {
                     "Статус: идёт запись · {}",
                     self.recording_mode.unwrap_or("запись")
                 )
+            } else if self.stopping {
+                "Статус: остановка".to_string()
             } else {
                 "Статус: готово".to_string()
             };
@@ -1619,6 +1648,10 @@ impl ScreenRecorderApp {
 
     /// Запускает или останавливает запись экрана.
     fn toggle_recording(&mut self, mode: &'static str) {
+        if self.stopping {
+            self.log = "Дождитесь завершения остановки записи.".to_string();
+            return;
+        }
         if self.client.is_some() {
             if self.recording {
                 self.send_stop();
@@ -1698,9 +1731,10 @@ impl ScreenRecorderApp {
         }
     }
 
-    /// Останавливает запись в текущем процессе.
+    /// Запускает остановку записи в фоне, чтобы окно и горячие клавиши
+    /// не зависали на склейке сегментов и финализации GStreamer.
     fn stop_recording_local(&mut self) {
-        if !self.recording {
+        if !self.recording || self.stopping {
             return;
         }
         tracing::info!(
@@ -1711,53 +1745,92 @@ impl ScreenRecorderApp {
         );
         let was_wayland_pending = self.wayland_pending;
         let was_wayland_active = self.using_wayland && self.wayland_recorder.is_running();
+        let using_wayland = self.using_wayland;
+        let audio_only = self.audio_only;
         self.recording = false;
+        self.stopping = true;
         self.recording_started_at = None;
         self.wayland_pending = false;
         self.wayland_started_at = None;
         self.recording_mode = None;
-        let audio_only = self.audio_only;
         self.audio_only = false;
-        let audio_result = self
-            .audio_recorder
-            .stop()
-            .map_err(|error| error.to_string());
-        let video_result: Result<(), String> = if audio_only {
-            Ok(())
-        } else if self.using_wayland {
-            if was_wayland_pending && !was_wayland_active {
-                self.wayland_recorder.request_stop();
+        self.status = "Остановка записи…".to_string();
+        let mut audio_recorder =
+            std::mem::replace(&mut self.audio_recorder, LinuxAudioRecorder::new());
+        let mut recorder = std::mem::replace(&mut self.recorder, X11VideoRecorder::new());
+        let mut wayland_recorder =
+            std::mem::replace(&mut self.wayland_recorder, WaylandPortalRecorder::new());
+        let (sender, receiver) = mpsc::channel();
+        self.stop_rx = Some(receiver);
+        std::thread::spawn(move || {
+            let audio_result = audio_recorder.stop().map_err(|error| error.to_string());
+            let video_result: Result<(), String> = if audio_only {
                 Ok(())
+            } else if using_wayland {
+                if was_wayland_pending && !was_wayland_active {
+                    wayland_recorder.request_stop();
+                    Ok(())
+                } else {
+                    wayland_recorder.stop()
+                }
             } else {
-                self.wayland_recorder.stop()
-            }
-        } else {
-            self.recorder.stop().map_err(|error| error.to_string())
+                recorder.stop().map_err(|error| error.to_string())
+            };
+            tracing::info!(
+                audio = ?audio_result,
+                video = ?video_result,
+                "фоновые процессы остановки завершены"
+            );
+            let _ = sender.send(StopOutcome {
+                audio_result,
+                video_result,
+                audio_only,
+                was_wayland_pending,
+                was_wayland_active,
+            });
+        });
+    }
+
+    /// Завершает остановку: манифест, уведомление и очередь экспорта.
+    fn poll_stop(&mut self) {
+        let outcome = match &self.stop_rx {
+            Some(receiver) => match receiver.try_recv() {
+                Ok(outcome) => outcome,
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    self.stop_rx = None;
+                    self.stopping = false;
+                    self.status = "Остановка прервана".to_string();
+                    self.log = "Поток остановки записи завершился.".to_string();
+                    return;
+                }
+            },
+            None => return,
         };
+        self.stop_rx = None;
         self.using_wayland = false;
         let dir = self
             .session_dir
             .as_ref()
             .map(|dir| dir.display().to_string())
             .unwrap_or_else(|| "каталог сессии".to_string());
-        if was_wayland_pending && !was_wayland_active {
-            // Остановка кнопкой, а не Esc: просто сообщаем, что запись не
-            // успела начаться и файла ещё нет.
+        if outcome.was_wayland_pending && !outcome.was_wayland_active {
             self.cancel_manifest("остановлено до получения доступа к экрану");
             self.status = "Запись остановлена".to_string();
             self.log = format!(
                 "Остановлено до подтверждения доступа к экрану; файл записи может отсутствовать: {dir}"
             );
+            self.stopping = false;
+            self.finish_quit_after_stop();
             return;
         }
-        if let Err(error) = &video_result {
+        if let Err(error) = &outcome.video_result {
             self.warn_manifest(format!("видео: {error}"));
         }
-        if let Err(error) = &audio_result {
+        if let Err(error) = &outcome.audio_result {
             self.warn_manifest(format!("аудио: {error}"));
         }
-        self.finalize_manifest(audio_only);
-        match (video_result, audio_result) {
+        match (&outcome.video_result, &outcome.audio_result) {
             (Ok(()), Ok(())) => {
                 self.status = "Запись остановлена".to_string();
                 self.log = format!("Запись сохранена: {dir}");
@@ -1772,9 +1845,25 @@ impl ScreenRecorderApp {
                 );
             }
         }
+        let finalize_started = Instant::now();
+        self.finalize_manifest(outcome.audio_only);
+        tracing::info!(
+            elapsed_ms = finalize_started.elapsed().as_millis(),
+            "манифест финализирован"
+        );
         if let Some(session_dir) = self.session_dir.clone() {
             append_session_log(&session_dir, "остановка записи");
             self.enqueue_export(&session_dir);
+        }
+        self.stopping = false;
+        self.finish_quit_after_stop();
+    }
+
+    /// Завершает сервис после фоновой остановки записи.
+    fn finish_quit_after_stop(&mut self) {
+        if self.quit_after_stop {
+            self.quit_after_stop = false;
+            self.quit_requested = true;
         }
     }
 
@@ -2962,6 +3051,14 @@ impl ScreenRecorderApp {
                 false,
             );
         }
+        if self.stopping {
+            return (
+                "Остановка",
+                "Завершаю видео и аудиодорожки, затем начнётся экспорт.".to_string(),
+                true,
+                false,
+            );
+        }
         if self.exporting {
             return (
                 "Экспорт",
@@ -3549,6 +3646,7 @@ impl ScreenRecorderApp {
             status: self.status.clone(),
             log: self.log.clone(),
             recording: self.recording,
+            stopping: self.stopping,
             recording_mode: self.recording_mode.map(str::to_string),
             audio_only: self.audio_only,
             using_wayland: self.using_wayland,
@@ -3601,8 +3699,8 @@ impl ScreenRecorderApp {
 
     /// Ставит в очередь старт записи по команде окна.
     fn request_start(&mut self, start: StartRequest) {
-        if self.recording || self.preflight_rx.is_some() {
-            self.log = "Запись уже идёт или проверяется звук.".to_string();
+        if self.recording || self.stopping || self.preflight_rx.is_some() {
+            self.log = "Запись уже идёт, останавливается или проверяется звук.".to_string();
             return;
         }
         match start.mode {
@@ -3639,6 +3737,7 @@ impl ScreenRecorderApp {
     /// Обновляет окно: снимок сервиса, загрузки, выбор области и настройки.
     fn tick_ui(&mut self, ctx: &egui::Context) {
         self.poll_daemon(ctx);
+        self.poll_stop();
         self.refresh_history();
         self.poll_download();
         self.poll_folder_picker();
@@ -3655,6 +3754,7 @@ impl ScreenRecorderApp {
 
     /// Обслуживает запись, очередь и трей в фоновом сервисе.
     fn tick_daemon(&mut self) {
+        self.poll_stop();
         if self.last_state_log.elapsed() >= Duration::from_secs(60) {
             self.last_state_log = Instant::now();
             if self.recording || self.exporting || self.transcribing || !self.queued_jobs.is_empty()
@@ -3757,6 +3857,7 @@ impl ScreenRecorderApp {
         self.status = snapshot.status;
         self.log = snapshot.log;
         self.recording = snapshot.recording;
+        self.stopping = snapshot.stopping;
         self.recording_mode = snapshot
             .recording_mode
             .as_deref()

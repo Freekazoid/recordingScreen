@@ -103,13 +103,16 @@ pub fn spawn_daemon(paths: &Paths) -> Result<(), String> {
         .append(true)
         .open(paths.log_dir.join("daemon.log"))
         .map_err(|error| format!("лог сервиса: {error}"))?;
-    Command::new(exe)
+    let mut child = Command::new(exe)
         .arg("--daemon")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(log))
         .spawn()
         .map_err(|error| format!("запуск сервиса: {error}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 
