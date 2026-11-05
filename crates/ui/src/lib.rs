@@ -3784,7 +3784,18 @@ fn recording_mode_static(mode: &str) -> Option<&'static str> {
 fn tray_label(text: &str, keys: &str) -> String {
     #[cfg(target_os = "linux")]
     {
-        format!("{text:<24}{keys}")
+        // Отступы подобраны по ширине Ubuntu Sans 11 (тема Yaru): все
+        // подписи получают одинаковую ширину 135–136 px, поэтому
+        // сочетания начинаются на одной вертикали и прижаты вправо.
+        let padding = match text {
+            "Весь экран" => 20,
+            "Область экрана" => 8,
+            "Программа" => 18,
+            "Только аудио" => 14,
+            "Остановить запись" => 1,
+            _ => 8,
+        };
+        format!("{text}{}{keys}", " ".repeat(padding))
     }
     #[cfg(not(target_os = "linux"))]
     {
