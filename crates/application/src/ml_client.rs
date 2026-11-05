@@ -5,6 +5,25 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+/// Настраивает дочерний процесс так, чтобы он завершался вместе с сервисом.
+///
+/// Без этого ML-воркер может пережить падение/перезапуск сервиса и
+/// продолжить занимать CPU и модели.
+fn die_with_parent(command: &mut Command) {
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = command;
+    }
+}
+
 /// Сегмент распознанной речи.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptSegment {
@@ -46,11 +65,13 @@ impl MlWorker {
         if embedded {
             command.arg("--ml-worker");
         }
-        let mut child = command
+        command
             .env("SCREENRECORDER_MODELS_DIR", models_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        die_with_parent(&mut command);
+        let mut child = command
             .spawn()
             .map_err(|error| format!("ML-воркер {}: {error}", binary.display()))?;
         let stdin = child
@@ -155,11 +176,14 @@ impl DiarizeWorker {
     /// Запускает `screenrecorder-diarize`.
     pub fn spawn(models_dir: &Path) -> Result<Self, String> {
         let binary = find_diarize_binary()?;
-        let mut child = Command::new(&binary)
+        let mut command = Command::new(&binary);
+        command
             .env("SCREENRECORDER_MODELS_DIR", models_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        die_with_parent(&mut command);
+        let mut child = command
             .spawn()
             .map_err(|error| format!("воркер диаризации {}: {error}", binary.display()))?;
         let stdin = child
@@ -252,11 +276,14 @@ impl NemoWorker {
     /// Запускает `screenrecorder-nemo`.
     pub fn spawn(models_dir: &Path) -> Result<Self, String> {
         let binary = find_nemo_binary()?;
-        let mut child = Command::new(&binary)
+        let mut command = Command::new(&binary);
+        command
             .env("SCREENRECORDER_MODELS_DIR", models_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        die_with_parent(&mut command);
+        let mut child = command
             .spawn()
             .map_err(|error| format!("NeMo-воркер {}: {error}", binary.display()))?;
         let stdin = child

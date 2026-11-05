@@ -68,6 +68,15 @@ fn main() -> anyhow::Result<()> {
     if args.iter().any(|arg| arg == "--diagnose") {
         return print_diagnostics();
     }
+    if args.iter().any(|arg| arg == "--daemon") {
+        let paths = Paths::discover().context("не удалось определить каталоги приложения")?;
+        paths.ensure_all().context("не удалось создать каталоги")?;
+        let settings = SettingsStore::new(paths.settings_path())
+            .load_or_create()
+            .context("не удалось загрузить настройки")?;
+        return screenrecorder_ui::run_daemon(paths, settings)
+            .map_err(|error| anyhow::anyhow!("фоновый сервис: {error}"));
+    }
     if args.iter().any(|arg| arg == "--ml-worker") {
         return screenrecorder_ml_worker::run_stdio();
     }

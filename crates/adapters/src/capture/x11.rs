@@ -286,11 +286,44 @@ fn parse_title(text: &str) -> String {
         if let Some((_, value)) = line.split_once('=') {
             let value = value.trim().trim_matches('"');
             if !value.is_empty() && value != "N/A" {
-                return value.to_string();
+                return decode_xprop_escapes(value);
             }
         }
     }
     String::new()
+}
+
+/// Раскодирует octal-escape последовательности `xprop` в UTF-8.
+///
+/// При `LC_ALL=C` утилита печатает кириллицу как `\320\240...`,
+/// из-за чего список окон выглядел набором цифр.
+fn decode_xprop_escapes(value: &str) -> String {
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            let mut buffer = [0_u8; 4];
+            bytes.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+            continue;
+        }
+        let mut octal = String::new();
+        while octal.len() < 3
+            && let Some(next) = chars.peek().copied()
+            && next.is_digit(8)
+        {
+            octal.push(next);
+            chars.next();
+        }
+        if octal.len() == 3
+            && let Ok(byte) = u8::from_str_radix(&octal, 8)
+        {
+            bytes.push(byte);
+        } else {
+            bytes.push(b'\\');
+            bytes.extend_from_slice(octal.as_bytes());
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// Делает снимок всего X11-экрана в PNG.
@@ -368,6 +401,15 @@ mod tests {
         assert!(args.contains(&"/tmp/screen-%03d.mkv".to_string()));
         assert!(args.contains(&"segment".to_string()));
         assert!(args.contains(&"20".to_string()));
+    }
+
+    /// Проверяет раскодирование кириллицы из octal-escape xprop.
+    #[test]
+    fn decodes_xprop_utf8_escapes() {
+        let title = decode_xprop_escapes(
+            "\\320\\240\\320\\265\\320\\272\\320\\276\\321\\200\\320\\264\\320\\265\\321\\200",
+        );
+        assert_eq!(title, "Рекордер");
     }
 
     /// Проверяет нормализацию имени дисплея.

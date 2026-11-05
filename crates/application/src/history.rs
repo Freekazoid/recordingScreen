@@ -8,6 +8,7 @@ use crate::manifest::{ManifestState, SessionManifest, load_manifest};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
 
 /// Ошибки истории.
@@ -368,7 +369,16 @@ impl HistoryStore {
                 source,
             })?;
         }
-        Connection::open(&self.path).map_err(|source| self.sqlite(source))
+        let connection = Connection::open(&self.path).map_err(|source| self.sqlite(source))?;
+        // UI и фоновый сервис открывают базу одновременно: WAL и таймаут
+        // не дают чтению падать с «database is locked».
+        connection
+            .busy_timeout(Duration::from_secs(3))
+            .map_err(|source| self.sqlite(source))?;
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .map_err(|source| self.sqlite(source))?;
+        Ok(connection)
     }
 
     /// Оборачивает ошибку SQLite с путём.

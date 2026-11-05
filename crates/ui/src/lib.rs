@@ -2,8 +2,14 @@
 //!
 //! Внешний вид повторяет текущее приложение: тёмная тема, вкладки
 //! «Запись / Настройки / О авторе», крупные кнопки режимов, блок экспорта
-//! и журнал внизу. UI вызывает только прикладные сервисы и не работает с
-//! файлами/процессами напрямую.
+//! и журнал внизу. Окно — тонкий клиент фонового сервиса: запись, очередь
+//! и трей живут в отдельном процессе и переживают закрытие окна.
+
+mod daemon;
+mod ipc;
+mod protocol;
+
+pub use daemon::run_daemon;
 
 use chrono::Local;
 use eframe::egui::{
@@ -13,6 +19,9 @@ use eframe::egui::{
 use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager,
     hotkey::{Code, HotKey, Modifiers},
+};
+use protocol::{
+    ProgressDto, RecordMode, RegionDto, Request, Response, Snapshot, StartRequest, UiAction,
 };
 use screenrecorder_adapters::{
     AudioDevice, AudioDeviceKind, AudioProbe, DownloadProgress, ExportRequest, LinuxAudioRecorder,
@@ -148,6 +157,18 @@ pub struct ScreenRecorderApp {
     folder_rx: Option<Receiver<Option<PathBuf>>>,
     folder_target: Option<FolderTarget>,
     settings_dirty: bool,
+    client: Option<ipc::Client>,
+    last_daemon_poll: Instant,
+    last_history_refresh: Instant,
+    daemon_lost_at: Option<Instant>,
+    recording_elapsed: u64,
+    preflight_active: bool,
+    queued_jobs_count: usize,
+    show_requested: bool,
+    ui_action: Option<UiAction>,
+    ui_clients: usize,
+    ui_launching_until: Option<Instant>,
+    quit_requested: bool,
     audio_devices: Vec<AudioDevice>,
     probe_rx: Option<Receiver<Result<AudioProbe, String>>>,
     probe_note: String,
@@ -185,12 +206,25 @@ pub struct ScreenRecorderApp {
     last_tray_command: Option<(TrayCommand, Instant)>,
     hotkey_manager: Option<GlobalHotKeyManager>,
     hotkey_bindings: Vec<(u32, TrayCommand)>,
-    allow_close: bool,
 }
 
 impl ScreenRecorderApp {
-    /// Создаёт приложение с уже загруженными настройками и путями.
-    pub fn new(paths: Paths, settings: Settings) -> Self {
+    /// Создаёт окно, подключённое к фоновому сервису.
+    pub fn new_ui(paths: Paths, settings: Settings, client: ipc::Client) -> Self {
+        Self::build(paths, settings, Some(client))
+    }
+
+    /// Создаёт фоновый сервис без окна.
+    pub(crate) fn new_daemon(paths: Paths, settings: Settings) -> Self {
+        Self::build(paths, settings, None)
+    }
+
+    /// Общая инициализация окна и сервиса.
+    ///
+    /// Сервис владеет записью, очередью, историей и треем. Окно только
+    /// читает снимок состояния и отправляет команды.
+    fn build(paths: Paths, settings: Settings, client: Option<ipc::Client>) -> Self {
+        let daemon = client.is_none();
         let models_root = if settings.models_dir.trim().is_empty() {
             paths.models_dir()
         } else {
@@ -199,10 +233,20 @@ impl ScreenRecorderApp {
         let model_manager = ModelManager::new(models_root);
         let audio_devices = LinuxAudioRecorder::list_devices().unwrap_or_default();
         let recordings = paths.data_dir.join("recordings");
-        let recovered = recover_incomplete(&recordings).unwrap_or_default();
-        let (recovered_segments, segment_errors) = recover_all_segments(&recordings);
+        let recovered = if daemon {
+            recover_incomplete(&recordings).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let (recovered_segments, segment_errors) = if daemon {
+            recover_all_segments(&recordings)
+        } else {
+            (0, Vec::new())
+        };
         let history = HistoryStore::new(paths.data_dir.join("history.sqlite3"));
-        let mut log = if recovered.is_empty() {
+        let mut log = if !daemon {
+            "Окно подключено к фоновому сервису.".to_string()
+        } else if recovered.is_empty() {
             "Готово. Проверьте систему и настройки.".to_string()
         } else {
             format!(
@@ -219,32 +263,43 @@ impl ScreenRecorderApp {
         }
         if let Err(error) = history.init() {
             log = format!("История недоступна: {error}");
-        } else if let Ok(imported) = import_manifests(&history, &recordings)
+        } else if daemon
+            && let Ok(imported) = import_manifests(&history, &recordings)
             && imported > 0
         {
             log = format!("{log} В истории записей: {imported}.");
         }
-        if let Ok(recovered_jobs) = history.recover_jobs()
+        if daemon
+            && let Ok(recovered_jobs) = history.recover_jobs()
             && recovered_jobs > 0
         {
             log = format!("{log} Задач возвращено в очередь: {recovered_jobs}.");
         }
-        let queued_jobs = history.queued_jobs(20).unwrap_or_default();
+        let queued_jobs = if daemon {
+            history.queued_jobs(20).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let history_records = history.list(100).unwrap_or_default();
-        let status = if model_manager.is_downloaded("whisper") {
+        let status = if !daemon {
+            "Подключение к сервису…".to_string()
+        } else if model_manager.is_downloaded("whisper") {
             "Готово к записи".to_string()
         } else {
             "Модели не скачаны".to_string()
         };
+        let output_format = settings.export.format.clone();
+        let video_quality = settings.export.video_quality.clone();
+        let audio_track_mode = settings.export.audio_mode.clone();
         let mut app = Self {
             paths,
             settings,
             screen: Screen::Record,
             status,
             log,
-            output_format: "mp4".to_string(),
-            video_quality: "Хорошее (CRF 23)".to_string(),
-            audio_track_mode: "Без пережатия".to_string(),
+            output_format,
+            video_quality,
+            audio_track_mode,
             recorder: X11VideoRecorder::new(),
             wayland_recorder: WaylandPortalRecorder::new(),
             using_wayland: false,
@@ -262,6 +317,18 @@ impl ScreenRecorderApp {
             folder_rx: None,
             folder_target: None,
             settings_dirty: false,
+            client,
+            last_daemon_poll: Instant::now(),
+            last_history_refresh: Instant::now(),
+            daemon_lost_at: None,
+            recording_elapsed: 0,
+            preflight_active: false,
+            queued_jobs_count: queued_jobs.len(),
+            show_requested: false,
+            ui_action: None,
+            ui_clients: 0,
+            ui_launching_until: None,
+            quit_requested: false,
             audio_devices,
             probe_rx: None,
             probe_note: String::new(),
@@ -299,10 +366,11 @@ impl ScreenRecorderApp {
             last_tray_command: None,
             hotkey_manager: None,
             hotkey_bindings: Vec::new(),
-            allow_close: false,
         };
-        app.init_tray();
-        app.init_hotkeys();
+        if daemon {
+            app.init_tray();
+            app.init_hotkeys();
+        }
         app
     }
 
@@ -425,7 +493,7 @@ impl ScreenRecorderApp {
     }
 
     /// Обрабатывает события трея.
-    fn poll_tray(&mut self, ctx: &egui::Context) {
+    fn poll_tray(&mut self) {
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             if let Some(command) = self
                 .tray_commands
@@ -433,13 +501,13 @@ impl ScreenRecorderApp {
                 .find(|(id, _)| id == &event.id)
                 .map(|(_, command)| *command)
             {
-                self.execute_tray_command(command, ctx);
+                self.execute_tray_command(command);
             }
         }
     }
 
     /// Обрабатывает глобальные горячие клавиши.
-    fn poll_hotkeys(&mut self, ctx: &egui::Context) {
+    fn poll_hotkeys(&mut self) {
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.state != global_hotkey::HotKeyState::Pressed {
                 continue;
@@ -450,13 +518,13 @@ impl ScreenRecorderApp {
                 .find(|(id, _)| *id == event.id)
                 .copied()
             {
-                self.execute_tray_command(command, ctx);
+                self.execute_tray_command(command);
             }
         }
     }
 
-    /// Выполняет команду трея или горячей клавиши.
-    fn execute_tray_command(&mut self, command: TrayCommand, ctx: &egui::Context) {
+    /// Выполняет команду трея или горячей клавиши в фоновом сервисе.
+    fn execute_tray_command(&mut self, command: TrayCommand) {
         if let Some((last, at)) = self.last_tray_command
             && last == command
             && at.elapsed() < Duration::from_millis(300)
@@ -465,22 +533,8 @@ impl ScreenRecorderApp {
         }
         self.last_tray_command = Some((command, Instant::now()));
         match command {
-            TrayCommand::Show => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                if is_wayland() {
-                    // winit на Wayland игнорирует разворачивание окна;
-                    // xdg-activation поднимает его через запрос внимания.
-                    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
-                        egui::UserAttentionType::Critical,
-                    ));
-                }
-            }
-            TrayCommand::Quit => {
-                self.allow_close = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
+            TrayCommand::Show => self.request_show_ui(),
+            TrayCommand::Quit => self.request_quit(),
             TrayCommand::Stop => {
                 if self.recording {
                     self.stop_recording();
@@ -503,12 +557,67 @@ impl ScreenRecorderApp {
                 match command {
                     TrayCommand::FullScreen => self.begin_preflight(PendingStart::FullScreen),
                     TrayCommand::Area => self.start_area_selection(),
-                    TrayCommand::Program => self.start_program_selection(),
+                    TrayCommand::Program => {
+                        if is_wayland() {
+                            self.begin_preflight(PendingStart::ProgramWayland);
+                        } else {
+                            self.request_ui_action(UiAction::Program);
+                        }
+                    }
                     TrayCommand::AudioOnly => self.begin_preflight(PendingStart::AudioOnly),
                     _ => {}
                 }
             }
         }
+    }
+
+    /// Показывает окно: фокусирует открытое или запускает новое.
+    fn request_show_ui(&mut self) {
+        if self.ui_clients > 0 {
+            self.show_requested = true;
+            return;
+        }
+        if self
+            .ui_launching_until
+            .is_some_and(|until| until > Instant::now())
+        {
+            return;
+        }
+        self.ui_launching_until = Some(Instant::now() + Duration::from_secs(3));
+        if let Err(error) = self.spawn_ui() {
+            self.log = format!("Не удалось открыть окно: {error}");
+        }
+    }
+
+    /// Просит окно выполнить действие (например, выбрать программу).
+    fn request_ui_action(&mut self, action: UiAction) {
+        self.ui_action = Some(action);
+        if self.ui_clients > 0 {
+            self.show_requested = true;
+        } else {
+            self.request_show_ui();
+        }
+    }
+
+    /// Запускает отдельный процесс окна.
+    fn spawn_ui(&self) -> Result<(), String> {
+        let exe = std::env::current_exe().map_err(|error| format!("исполняемый файл: {error}"))?;
+        Command::new(exe)
+            .arg("--ui")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|error| format!("запуск окна: {error}"))?;
+        Ok(())
+    }
+
+    /// Останавливает запись и завершает сервис.
+    fn request_quit(&mut self) {
+        if self.recording {
+            self.stop_recording();
+        }
+        self.quit_requested = true;
     }
 
     /// Обновляет статус в меню трея при изменении записи.
@@ -895,6 +1004,9 @@ impl ScreenRecorderApp {
         if !self.settings_dirty {
             return;
         }
+        self.settings.export.format = self.output_format.clone();
+        self.settings.export.video_quality = self.video_quality.clone();
+        self.settings.export.audio_mode = self.audio_track_mode.clone();
         let store = SettingsStore::new(self.paths.settings_path());
         match store.save(&self.settings) {
             Ok(()) => self.log = "Настройки сохранены автоматически.".to_string(),
@@ -907,6 +1019,14 @@ impl ScreenRecorderApp {
         };
         self.model_manager = ModelManager::new(root);
         self.settings_dirty = false;
+        if self.client.is_some() {
+            let request = Request::ReloadSettings {
+                settings: Box::new(self.settings.clone()),
+            };
+            if let Err(error) = self.send_request(&request) {
+                self.log = format!("Сервис не принял настройки: {error}");
+            }
+        }
     }
 
     /// Удаляет скачанную модель.
@@ -919,6 +1039,7 @@ impl ScreenRecorderApp {
                     "Модели не скачаны".to_string()
                 };
                 self.log = format!("Модель удалена: {id}");
+                self.notify_service_settings();
             }
             Err(error) => {
                 self.status = format!("Ошибка удаления модели: {error}");
@@ -977,6 +1098,7 @@ impl ScreenRecorderApp {
                         "Модель скачана".to_string()
                     };
                     self.log = "Загрузка модели завершена.".to_string();
+                    self.notify_service_settings();
                     self.download_rx = None;
                     self.download_model = None;
                     self.download_progress = 0.0;
@@ -990,6 +1112,17 @@ impl ScreenRecorderApp {
                 }
             }
         }
+    }
+
+    /// Передаёт сервису актуальные настройки после смены моделей.
+    fn notify_service_settings(&mut self) {
+        if self.client.is_none() {
+            return;
+        }
+        let request = Request::ReloadSettings {
+            settings: Box::new(self.settings.clone()),
+        };
+        let _ = self.send_request(&request);
     }
 
     /// Запускает фоновую проверку звука перед записью.
@@ -1125,6 +1258,7 @@ impl ScreenRecorderApp {
         self.start_audio(&session_dir);
         if self.audio_recorder.is_running() {
             self.recording = true;
+            self.recording_started_at = Some(Instant::now());
             self.recording_mode = Some("Только аудио");
             self.status = "Идёт аудиозапись".to_string();
             notify("Screen Recorder", "Аудиозапись началась");
@@ -1348,6 +1482,9 @@ impl ScreenRecorderApp {
         };
         self.area_rx = None;
         match result {
+            Ok(region) if self.client.is_some() => {
+                self.send_start(RecordMode::Area, Some(region));
+            }
             Ok(region) => self.begin_preflight(PendingStart::Region(region, "Область экрана")),
             Err(error) if error == "область не выбрана" => {
                 self.status = "Выбор области отменён".to_string();
@@ -1436,7 +1573,11 @@ impl ScreenRecorderApp {
     /// Запускает выбор программы/окна.
     fn start_program_selection(&mut self) {
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            self.begin_preflight(PendingStart::ProgramWayland);
+            if self.client.is_some() {
+                self.send_start(RecordMode::Program, None);
+            } else {
+                self.begin_preflight(PendingStart::ProgramWayland);
+            }
             return;
         }
 
@@ -1457,6 +1598,19 @@ impl ScreenRecorderApp {
 
     /// Запускает или останавливает запись экрана.
     fn toggle_recording(&mut self, mode: &'static str) {
+        if self.client.is_some() {
+            if self.recording {
+                self.send_stop();
+                return;
+            }
+            match mode {
+                "Только аудио" => self.send_start(RecordMode::AudioOnly, None),
+                "Область экрана" => self.start_area_selection(),
+                "Программа" => self.start_program_selection(),
+                _ => self.send_start(RecordMode::FullScreen, None),
+            }
+            return;
+        }
         if self.recording {
             self.stop_recording();
             return;
@@ -1473,8 +1627,52 @@ impl ScreenRecorderApp {
         }
     }
 
-    /// Останавливает текущую запись.
+    /// Отправляет запрос сервису.
+    fn send_request(&mut self, request: &Request) -> Result<Response, String> {
+        self.client
+            .as_mut()
+            .ok_or_else(|| "фоновый сервис не подключён".to_string())?
+            .request(request)
+    }
+
+    /// Просит сервис остановить запись.
+    fn send_stop(&mut self) {
+        match self.send_request(&Request::Stop) {
+            Ok(Response::Ok) => self.status = "Остановка записи…".to_string(),
+            Ok(Response::Error { message }) | Err(message) => self.log = message,
+            Ok(_) => {}
+        }
+    }
+
+    /// Просит сервис начать запись.
+    fn send_start(&mut self, mode: RecordMode, region: Option<Region>) {
+        let request = Request::Start(StartRequest {
+            mode,
+            region: region.map(|region| RegionDto {
+                x: region.x,
+                y: region.y,
+                width: region.width,
+                height: region.height,
+            }),
+        });
+        match self.send_request(&request) {
+            Ok(Response::Ok) => self.status = "Запуск записи…".to_string(),
+            Ok(Response::Error { message }) | Err(message) => self.log = message,
+            Ok(_) => {}
+        }
+    }
+
+    /// Останавливает текущую запись (локально или через сервис).
     fn stop_recording(&mut self) {
+        if self.client.is_some() {
+            self.send_stop();
+        } else {
+            self.stop_recording_local();
+        }
+    }
+
+    /// Останавливает запись в текущем процессе.
+    fn stop_recording_local(&mut self) {
         if !self.recording {
             return;
         }
@@ -1796,8 +1994,21 @@ impl ScreenRecorderApp {
         }
     }
 
-    /// Отменяет текущее распознавание, завершая ML-воркер.
+    /// Отменяет распознавание: локально или командой сервису.
     fn cancel_ml(&mut self) {
+        if self.client.is_some() {
+            match self.send_request(&Request::CancelMl) {
+                Ok(Response::Ok) => self.status = "Отмена распознавания…".to_string(),
+                Ok(Response::Error { message }) | Err(message) => self.log = message,
+                Ok(_) => {}
+            }
+            return;
+        }
+        self.cancel_ml_local();
+    }
+
+    /// Завершает ML-воркер в текущем процессе.
+    fn cancel_ml_local(&mut self) {
         let pid = self
             .ml_progress
             .as_ref()
@@ -2464,7 +2675,11 @@ impl ScreenRecorderApp {
             self.show_windows = false;
         }
         if let Some(region) = selected {
-            self.begin_preflight(PendingStart::Region(region, "Программа"));
+            if self.client.is_some() {
+                self.send_start(RecordMode::Program, Some(region));
+            } else {
+                self.begin_preflight(PendingStart::Region(region, "Программа"));
+            }
         }
     }
 
@@ -2564,16 +2779,18 @@ impl ScreenRecorderApp {
                 .spacing([10.0, 8.0])
                 .show(ui, |ui| {
                     ui.label("Формат файла:");
-                    Self::combo(
+                    if Self::combo(
                         ui,
                         "output_format",
                         &mut self.output_format,
                         &["mp4", "mkv", "webm", "avi", "mov", "flv"],
-                    );
+                    ) {
+                        self.settings_dirty = true;
+                    }
                     ui.end_row();
 
                     ui.label("Качество видео:");
-                    Self::combo(
+                    if Self::combo(
                         ui,
                         "video_quality",
                         &mut self.video_quality,
@@ -2583,16 +2800,20 @@ impl ScreenRecorderApp {
                             "Среднее (CRF 28)",
                             "Сильное сжатие (CRF 35)",
                         ],
-                    );
+                    ) {
+                        self.settings_dirty = true;
+                    }
                     ui.end_row();
 
                     ui.label("Звуковая дорожка:");
-                    Self::combo(
+                    if Self::combo(
                         ui,
                         "audio_track_mode",
                         &mut self.audio_track_mode,
                         &["Без пережатия", "Сжать (AAC 128k)", "Без звука"],
-                    );
+                    ) {
+                        self.settings_dirty = true;
+                    }
                     ui.end_row();
                 });
         });
@@ -2645,13 +2866,19 @@ impl ScreenRecorderApp {
         if self.transcribing && ui.button("Отменить распознавание").clicked() {
             self.cancel_ml();
         }
-        if !self.queued_jobs.is_empty() {
+        let queued = self.queued_total();
+        if queued > 0 {
             ui.label(
-                RichText::new(format!("В очереди задач: {}", self.queued_jobs.len()))
+                RichText::new(format!("В очереди задач: {queued}"))
                     .size(11.0)
                     .color(HINT),
             );
         }
+    }
+
+    /// Количество задач в очереди (локальное или из снимка сервиса).
+    fn queued_total(&self) -> usize {
+        self.queued_jobs.len().max(self.queued_jobs_count)
     }
 
     /// Возвращает заголовок, подробное описание, активность и признак ошибки.
@@ -2659,7 +2886,7 @@ impl ScreenRecorderApp {
         if self.status.starts_with("Ошибка") || self.status.contains("с ошибками") {
             return ("Ошибка", self.status.clone(), false, true);
         }
-        if self.preflight_rx.is_some() {
+        if self.preflight_active || self.preflight_rx.is_some() {
             return (
                 "Проверка звука",
                 "Проверяю микрофон и системный звук. Это занимает 1–2 секунды.".to_string(),
@@ -2676,10 +2903,13 @@ impl ScreenRecorderApp {
             );
         }
         if self.recording {
-            let elapsed = self
-                .recording_started_at
-                .map(|started| started.elapsed().as_secs())
-                .unwrap_or(0);
+            let elapsed = if self.recording_elapsed > 0 {
+                self.recording_elapsed
+            } else {
+                self.recording_started_at
+                    .map(|started| started.elapsed().as_secs())
+                    .unwrap_or(0)
+            };
             let mode = self.recording_mode.unwrap_or("Запись");
             return (
                 "Идёт запись",
@@ -2713,12 +2943,12 @@ impl ScreenRecorderApp {
                 false,
             );
         }
-        if !self.queued_jobs.is_empty() {
+        let queued = self.queued_total();
+        if queued > 0 {
             return (
                 "В очереди",
                 format!(
-                    "Ожидают выполнения задач: {}. Экспорт и распознавание идут по очереди.",
-                    self.queued_jobs.len()
+                    "Ожидают выполнения задач: {queued}. Экспорт и распознавание идут по очереди."
                 ),
                 true,
                 false,
@@ -2778,10 +3008,29 @@ impl ScreenRecorderApp {
 
     /// Удаляет запись: экспортированное видео, дорожки и транскрипты.
     fn delete_record(&mut self, record: SessionRecord) {
+        if self.client.is_some() {
+            match self.send_request(&Request::DeleteSession {
+                session_id: record.id.clone(),
+            }) {
+                Ok(Response::Ok) => self.log = format!("Удалено: {}", record.title),
+                Ok(Response::Error { message }) | Err(message) => {
+                    self.log = format!("Удаление: {message}");
+                }
+                Ok(_) => {}
+            }
+            self.delete_confirm = None;
+            self.refresh_history();
+            return;
+        }
+        self.delete_session_record(&record);
+        self.delete_confirm = None;
+    }
+
+    /// Удаляет файлы сессии и запись истории в текущем процессе.
+    fn delete_session_record(&mut self, record: &SessionRecord) {
         let session_dir = PathBuf::from(&record.output_dir);
         if self.recording && self.session_dir.as_deref() == Some(session_dir.as_path()) {
             self.log = "Нельзя удалить запись, которая ещё идёт.".to_string();
-            self.delete_confirm = None;
             return;
         }
         let mut errors = Vec::new();
@@ -2833,12 +3082,28 @@ impl ScreenRecorderApp {
         }
         self.history_records.retain(|item| item.id != record.id);
         self.queued_jobs.retain(|job| job.session_id != record.id);
-        self.delete_confirm = None;
         if errors.is_empty() {
             self.log = format!("Удалено: {}", record.title);
         } else {
             self.log = format!("Удаление с ошибками: {}", errors.join("; "));
         }
+    }
+
+    /// Удаляет сессию по id из команды окна.
+    fn delete_session_by_id(&mut self, session_id: &str) -> Result<(), String> {
+        let record =
+            self.history_records
+                .iter()
+                .find(|record| record.id == session_id)
+                .cloned()
+                .or_else(|| {
+                    self.history.list(100).ok().and_then(|records| {
+                        records.into_iter().find(|record| record.id == session_id)
+                    })
+                })
+                .ok_or_else(|| "запись не найдена".to_string())?;
+        self.delete_session_record(&record);
+        Ok(())
     }
 
     /// Показывает подтверждение удаления записи.
@@ -3238,53 +3503,239 @@ impl ScreenRecorderApp {
 
     /// Обрабатывает фоновые события и команды.
     ///
-    /// Вызывается и при скрытом окне, поэтому запись, очередь и трей
-    /// продолжают работать после сворачивания. Здесь же обрабатывается
-    /// крестик окна: без трея приложение закрывается штатно, с треем —
-    /// скрывается, а полное закрытие доступно только через «Выход».
-    fn tick(&mut self, ctx: &egui::Context) {
-        if ctx.input(|input| input.viewport().close_requested()) && !self.allow_close {
-            if self.tray.is_some() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                if is_wayland() {
-                    // Wayland не умеет скрывать обычное окно: set_visible там
-                    // no-op. Сворачиваем в панель задач, процесс продолжает
-                    // работать, трей и запись остаются доступны.
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                } else {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                }
-                notify("Screen Recorder", "Приложение свёрнуто");
-            } else {
-                // Если трей не создался, скрывать окно нельзя: пользователь
-                // не сможет вернуть приложение.
-                self.allow_close = true;
-            }
+    /// Собирает снимок состояния для окна.
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            status: self.status.clone(),
+            log: self.log.clone(),
+            recording: self.recording,
+            recording_mode: self.recording_mode.map(str::to_string),
+            audio_only: self.audio_only,
+            using_wayland: self.using_wayland,
+            wayland_pending: self.wayland_pending,
+            recording_elapsed: self
+                .recording_started_at
+                .map(|started| started.elapsed().as_secs())
+                .unwrap_or(0),
+            mic_dbfs: self.mic_dbfs,
+            system_dbfs: self.system_dbfs,
+            transcribing: self.transcribing,
+            exporting: self.exporting,
+            preflight_active: self.preflight_rx.is_some(),
+            preflight_warnings: self.preflight_warnings.clone(),
+            ml_progress: self.ml_progress.as_ref().map(|progress| ProgressDto {
+                stage: progress.stage.clone(),
+                percent: progress.percent,
+            }),
+            queued_jobs: self.queued_jobs.len(),
+            show_requested: self.show_requested,
+            ui_action: self.ui_action,
         }
+    }
+
+    /// Применяет новые настройки, пришедшие из окна.
+    fn apply_settings(&mut self, settings: Settings) {
+        if let Err(error) = settings.validate() {
+            self.log = format!("Настройки не применены: {error}");
+            return;
+        }
+        self.settings = settings;
+        self.output_format = self.settings.export.format.clone();
+        self.video_quality = self.settings.export.video_quality.clone();
+        self.audio_track_mode = self.settings.export.audio_mode.clone();
+        let models_root = if self.settings.models_dir.trim().is_empty() {
+            self.paths.models_dir()
+        } else {
+            PathBuf::from(self.settings.models_dir.trim())
+        };
+        self.model_manager = ModelManager::new(models_root);
+        self.audio_devices = LinuxAudioRecorder::list_devices().unwrap_or_default();
+        if !self.recording && !self.transcribing && !self.exporting {
+            self.status = if self.model_manager.is_downloaded("whisper") {
+                "Готово к записи".to_string()
+            } else {
+                "Модели не скачаны".to_string()
+            };
+        }
+    }
+
+    /// Ставит в очередь старт записи по команде окна.
+    fn request_start(&mut self, start: StartRequest) {
+        if self.recording || self.preflight_rx.is_some() {
+            self.log = "Запись уже идёт или проверяется звук.".to_string();
+            return;
+        }
+        match start.mode {
+            RecordMode::FullScreen => self.begin_preflight(PendingStart::FullScreen),
+            RecordMode::AudioOnly => self.begin_preflight(PendingStart::AudioOnly),
+            RecordMode::Area => match start.region {
+                Some(region) => self.begin_preflight(PendingStart::Region(
+                    Region {
+                        x: region.x,
+                        y: region.y,
+                        width: region.width,
+                        height: region.height,
+                    },
+                    "Область экрана",
+                )),
+                None => self.log = "Не выбрана область записи.".to_string(),
+            },
+            RecordMode::Program => match start.region {
+                Some(region) => self.begin_preflight(PendingStart::Region(
+                    Region {
+                        x: region.x,
+                        y: region.y,
+                        width: region.width,
+                        height: region.height,
+                    },
+                    "Программа",
+                )),
+                None if is_wayland() => self.begin_preflight(PendingStart::ProgramWayland),
+                None => self.log = "Для программы нужно выбрать окно.".to_string(),
+            },
+        }
+    }
+
+    /// Обновляет окно: снимок сервиса, загрузки, выбор области и настройки.
+    fn tick_ui(&mut self, ctx: &egui::Context) {
+        self.poll_daemon(ctx);
+        self.refresh_history();
+        self.poll_download();
+        self.poll_folder_picker();
+        self.poll_probe();
+        self.poll_area();
+        self.persist_settings();
+        if let Some(lost) = self.daemon_lost_at
+            && lost.elapsed() > Duration::from_secs(3)
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        ctx.request_repaint_after(Duration::from_millis(200));
+    }
+
+    /// Обслуживает запись, очередь и трей в фоновом сервисе.
+    fn tick_daemon(&mut self) {
         self.poll_recording();
         self.poll_preflight();
         self.poll_transcription();
         self.poll_ml_progress();
         self.poll_job_queue();
-        self.poll_tray(ctx);
-        self.poll_hotkeys(ctx);
+        self.poll_tray();
+        self.poll_hotkeys();
         self.sync_tray_state();
-        self.poll_download();
-        self.poll_folder_picker();
-        self.poll_probe();
         self.poll_area();
         self.poll_export();
-        self.persist_settings();
-        if !self.hotkey_bindings.is_empty() || self.tray.is_some() || self.recording {
-            ctx.request_repaint_after(Duration::from_millis(200));
+    }
+
+    /// Запрашивает снимок состояния у фонового сервиса.
+    fn poll_daemon(&mut self, ctx: &egui::Context) {
+        if self.last_daemon_poll.elapsed() < Duration::from_millis(200) {
+            return;
         }
+        self.last_daemon_poll = Instant::now();
+        let reply = self
+            .client
+            .as_mut()
+            .map(|client| client.request(&Request::Snapshot));
+        let Some(reply) = reply else {
+            self.mark_daemon_lost("Сервис не подключён");
+            return;
+        };
+        match reply {
+            Ok(Response::Snapshot(snapshot)) => {
+                self.daemon_lost_at = None;
+                if snapshot.show_requested {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    if is_wayland() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                            egui::UserAttentionType::Critical,
+                        ));
+                    }
+                    if let Some(client) = self.client.as_mut() {
+                        let _ = client.request(&Request::AckShow);
+                    }
+                }
+                if snapshot.ui_action == Some(UiAction::Program) && !self.show_windows {
+                    self.screen = Screen::Record;
+                    self.start_program_selection();
+                    if let Some(client) = self.client.as_mut() {
+                        let _ = client.request(&Request::AckAction);
+                    }
+                }
+                self.apply_snapshot(snapshot);
+            }
+            Ok(Response::Error { message }) => {
+                self.status = message.clone();
+                self.log = message;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.mark_daemon_lost(&error);
+            }
+        }
+    }
+
+    /// Помечает потерю сервиса и сбрасывает активные индикаторы.
+    fn mark_daemon_lost(&mut self, reason: &str) {
+        if self.daemon_lost_at.is_none() {
+            self.daemon_lost_at = Some(Instant::now());
+            self.status = "Фоновый сервис остановлен".to_string();
+            self.log = reason.to_string();
+            self.recording = false;
+            self.recording_mode = None;
+            self.transcribing = false;
+            self.exporting = false;
+            self.ml_progress = None;
+            self.preflight_active = false;
+        }
+        self.client = None;
+    }
+
+    /// Переносит снимок сервиса в поля интерфейса.
+    fn apply_snapshot(&mut self, snapshot: Snapshot) {
+        self.status = snapshot.status;
+        self.log = snapshot.log;
+        self.recording = snapshot.recording;
+        self.recording_mode = snapshot
+            .recording_mode
+            .as_deref()
+            .and_then(recording_mode_static);
+        self.audio_only = snapshot.audio_only;
+        self.using_wayland = snapshot.using_wayland;
+        self.wayland_pending = snapshot.wayland_pending;
+        self.recording_elapsed = snapshot.recording_elapsed;
+        self.mic_dbfs = snapshot.mic_dbfs;
+        self.system_dbfs = snapshot.system_dbfs;
+        self.transcribing = snapshot.transcribing;
+        self.exporting = snapshot.exporting;
+        self.preflight_active = snapshot.preflight_active;
+        self.preflight_warnings = snapshot.preflight_warnings;
+        self.ml_progress = snapshot.ml_progress.map(|progress| ProgressInfo {
+            stage: progress.stage,
+            percent: progress.percent,
+            pid: 0,
+        });
+        self.queued_jobs_count = snapshot.queued_jobs;
+        self.show_requested = snapshot.show_requested;
+        self.ui_action = snapshot.ui_action;
+    }
+
+    /// Обновляет историю из общей SQLite-базы.
+    fn refresh_history(&mut self) {
+        if self.last_history_refresh.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.last_history_refresh = Instant::now();
+        self.history_records = self.history.list(100).unwrap_or_default();
     }
 }
 
 impl eframe::App for ScreenRecorderApp {
-    /// Обрабатывает события до отрисовки, в том числе при скрытом окне.
+    /// Обрабатывает события окна до отрисовки.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.tick(ctx);
+        self.tick_ui(ctx);
     }
 
     /// Обновляет интерфейс на каждом кадре.
@@ -3308,10 +3759,21 @@ impl eframe::App for ScreenRecorderApp {
 
 /// Проверяет, что приложение работает через Wayland.
 ///
-/// На Wayland нельзя скрыть обычное окно (`set_visible` — no-op),
-/// поэтому close-to-tray сворачивает его в панель задач.
+/// Нужно для возврата окна из трея через xdg-activation: на Wayland
+/// обычный `Focus`/`Minimized(false)` не работают.
 fn is_wayland() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some()
+}
+
+/// Переводит название режима из снимка в статическую строку.
+fn recording_mode_static(mode: &str) -> Option<&'static str> {
+    match mode {
+        "Весь экран" => Some("Весь экран"),
+        "Область экрана" => Some("Область экрана"),
+        "Программа" => Some("Программа"),
+        "Только аудио" => Some("Только аудио"),
+        _ => None,
+    }
 }
 
 /// Формирует подпись пункта меню трея.
@@ -3609,8 +4071,9 @@ fn configure_style(ctx: &egui::Context) {
     });
 }
 
-/// Запускает нативное окно приложения.
-pub fn run(paths: Paths, settings: Settings) -> eframe::Result {
+/// Запускает окно интерфейса, подключённое к фоновому сервису.
+pub fn run(paths: Paths, settings: Settings) -> Result<(), String> {
+    let client = ipc::ensure_daemon(&paths)?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([380.0, 660.0])
@@ -3626,9 +4089,10 @@ pub fn run(paths: Paths, settings: Settings) -> eframe::Result {
         Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
             configure_style(&cc.egui_ctx);
-            Ok(Box::new(ScreenRecorderApp::new(paths, settings)))
+            Ok(Box::new(ScreenRecorderApp::new_ui(paths, settings, client)))
         }),
     )
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

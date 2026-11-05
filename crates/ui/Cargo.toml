@@ -16,6 +16,7 @@ global-hotkey.workspace = true
 image.workspace = true
 tray-icon.workspace = true
 rfd.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

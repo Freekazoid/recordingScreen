@@ -11,6 +11,11 @@
     "mic_device": "",
     "system_device": ""
   },
+  "export": {
+    "format": "mp4",
+    "video_quality": "Хорошее (CRF 23)",
+    "audio_mode": "Без пережатия"
+  },
   "transcription": {
     "enabled": true,
     "engine": "whisper-rs",

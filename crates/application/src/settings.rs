@@ -117,6 +117,26 @@ impl Default for DiarizationSettings {
     }
 }
 
+/// Параметры экспорта.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ExportSettings {
+    pub format: String,
+    pub video_quality: String,
+    pub audio_mode: String,
+}
+
+impl Default for ExportSettings {
+    /// Возвращает параметры экспорта по умолчанию.
+    fn default() -> Self {
+        Self {
+            format: "mp4".to_string(),
+            video_quality: "Хорошее (CRF 23)".to_string(),
+            audio_mode: "Без пережатия".to_string(),
+        }
+    }
+}
+
 /// Параметры приватности.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -163,6 +183,8 @@ pub struct Settings {
     #[serde(default)]
     pub capture: CaptureSettings,
     #[serde(default)]
+    pub export: ExportSettings,
+    #[serde(default)]
     pub transcription: TranscriptionSettings,
     #[serde(default)]
     pub diarization: DiarizationSettings,
@@ -198,6 +220,7 @@ impl Settings {
             output_dir: String::new(),
             models_dir: String::new(),
             capture: CaptureSettings::default(),
+            export: ExportSettings::default(),
             transcription: TranscriptionSettings::default(),
             diarization: DiarizationSettings::default(),
             privacy: PrivacySettings::default(),

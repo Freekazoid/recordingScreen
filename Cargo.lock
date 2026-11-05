@@ -4292,6 +4292,7 @@ name = "screenrecorder-application"
 version = "4.0.0-alpha.1"
 dependencies = [
  "chrono",
+ "libc",
  "rusqlite",
  "screenrecorder-domain",
  "serde",
@@ -4372,6 +4373,7 @@ dependencies = [
  "screenrecorder-adapters",
  "screenrecorder-application",
  "screenrecorder-domain",
+ "serde",
  "serde_json",
  "tempfile",
  "tray-icon",
