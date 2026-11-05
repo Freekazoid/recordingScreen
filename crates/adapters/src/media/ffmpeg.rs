@@ -44,7 +44,11 @@ pub struct ExportRequest {
     pub crf: u32,
     pub audio_mode: String,
     pub audio_offset_ms: i64,
+    pub mic_gain_db: f32,
 }
+
+/// Мягкое усиление тихой микрофонной дорожки.
+const MIC_FILTER: &str = "highpass=f=80,dynaudnorm=f=500:m=15:p=0.95";
 
 /// Сводит видео и аудио в итоговый файл.
 pub fn merge_recording(request: &ExportRequest) -> Result<PathBuf, MediaError> {
@@ -84,6 +88,7 @@ pub fn merge_audio(
     system_audio: Option<PathBuf>,
     mic_audio: Option<PathBuf>,
     output: &Path,
+    mic_gain_db: f32,
 ) -> Result<PathBuf, MediaError> {
     if system_audio.is_none() && mic_audio.is_none() {
         return Err(MediaError::NoAudio);
@@ -122,8 +127,19 @@ pub fn merge_audio(
         args.extend([
             "-filter_complex".to_string(),
             format!(
-                "[{}:a][{}:a]amix=inputs=2:normalize=0:duration=longest[aout]",
+                "[{}:a]anull[sys];[{}:a]volume={mic_gain_db:.1}dB,{MIC_FILTER}[mic];\
+                 [sys][mic]amix=inputs=2:normalize=0:duration=longest[aout]",
                 inputs[0], inputs[1]
+            ),
+            "-map".to_string(),
+            "[aout]".to_string(),
+        ]);
+    } else if mic_audio.is_some() {
+        args.extend([
+            "-filter_complex".to_string(),
+            format!(
+                "[{}:a]volume={mic_gain_db:.1}dB,{MIC_FILTER}[aout]",
+                inputs[0]
             ),
             "-map".to_string(),
             "[aout]".to_string(),
@@ -187,8 +203,21 @@ fn build_args(request: &ExportRequest) -> Vec<String> {
             args.extend([
                 "-filter_complex".to_string(),
                 format!(
-                    "[{}:a][{}:a]amix=inputs=2:normalize=0:duration=longest[aout]",
-                    audio_inputs[0], audio_inputs[1]
+                    "[{}:a]anull[sys];[{}:a]volume={:.1}dB,{MIC_FILTER}[mic];\
+                     [sys][mic]amix=inputs=2:normalize=0:duration=longest[aout]",
+                    audio_inputs[0], audio_inputs[1], request.mic_gain_db
+                ),
+                "-map".to_string(),
+                "0:v:0".to_string(),
+                "-map".to_string(),
+                "[aout]".to_string(),
+            ]);
+        } else if request.mic_audio.is_some() {
+            args.extend([
+                "-filter_complex".to_string(),
+                format!(
+                    "[{}:a]volume={:.1}dB,{MIC_FILTER}[aout]",
+                    audio_inputs[0], request.mic_gain_db
                 ),
                 "-map".to_string(),
                 "0:v:0".to_string(),
@@ -293,11 +322,13 @@ mod tests {
             crf: 23,
             audio_mode: "aac".to_string(),
             audio_offset_ms: 120,
+            mic_gain_db: 12.0,
         };
         let args = build_args(&request);
         assert!(args.contains(&"-filter_complex".to_string()));
         assert!(args.contains(&"-itsoffset".to_string()));
         assert!(args.iter().any(|arg| arg.contains("amix=inputs=2")));
+        assert!(args.iter().any(|arg| arg.contains("dynaudnorm")));
         assert!(args.contains(&"aac".to_string()));
         assert_eq!(args.last(), Some(&"/tmp/out.mp4".to_string()));
     }
@@ -314,6 +345,7 @@ mod tests {
             crf: 28,
             audio_mode: "none".to_string(),
             audio_offset_ms: 0,
+            mic_gain_db: 0.0,
         };
         let args = build_args(&request);
         assert!(args.contains(&"-an".to_string()));
@@ -376,6 +408,7 @@ mod tests {
             crf: 23,
             audio_mode: "aac".to_string(),
             audio_offset_ms: 0,
+            mic_gain_db: 0.0,
         };
         merge_recording(&request).expect("merge");
         assert!(is_usable(&output));

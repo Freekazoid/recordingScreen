@@ -2379,6 +2379,7 @@ impl ScreenRecorderApp {
             crf: crf_from_label(&self.video_quality),
             audio_mode: audio_mode_from_label(&self.audio_track_mode),
             audio_offset_ms: self.audio_offset_ms,
+            mic_gain_db: microphone_gain_db(session_dir),
         };
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
@@ -2417,9 +2418,11 @@ impl ScreenRecorderApp {
         let system = system.exists().then_some(system);
         let mic = mic.exists().then_some(mic);
         let target = output.clone();
+        let mic_gain_db = microphone_gain_db(session_dir);
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
-            let result = merge_audio(system, mic, &target).map_err(|error| error.to_string());
+            let result =
+                merge_audio(system, mic, &target, mic_gain_db).map_err(|error| error.to_string());
             let _ = sender.send(result);
         });
         self.export_rx = Some(receiver);
@@ -4078,6 +4081,26 @@ fn read_progress(path: &Path) -> Option<ProgressInfo> {
             .unwrap_or_default()
             .to_string(),
     })
+}
+
+/// Подбирает усиление микрофона по статистике записи.
+fn microphone_gain_db(session_dir: &Path) -> f32 {
+    let Ok(manifest) = load_manifest(session_dir) else {
+        return 0.0;
+    };
+    let Some(track) = manifest
+        .tracks
+        .iter()
+        .find(|track| matches!(track.kind, TrackKind::Mic))
+    else {
+        return 0.0;
+    };
+    let rms = track.stats.rms_dbfs;
+    if rms.is_finite() && rms < -24.0 {
+        (-26.0 - rms).clamp(0.0, 18.0)
+    } else {
+        0.0
+    }
 }
 
 /// Форматирует размер файла в мегабайтах.
