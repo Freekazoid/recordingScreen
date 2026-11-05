@@ -141,6 +141,11 @@ fn drain_events(app: &mut ScreenRecorderApp, events: &Receiver<Event>) {
         match event {
             Event::Disconnected => {
                 app.ui_clients = app.ui_clients.saturating_sub(1);
+                if app.ui_clients == 0 && app.tray.is_none() {
+                    // Без трея закрытое окно нельзя вернуть: не оставляем
+                    // невидимый сервис, который продолжил бы запись.
+                    app.request_quit();
+                }
             }
             Event::Request { request, reply } => {
                 let response = handle_request(app, *request);
