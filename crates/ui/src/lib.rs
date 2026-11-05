@@ -2020,12 +2020,13 @@ impl ScreenRecorderApp {
         };
         let language = self.settings.transcription.language.clone();
         let compute_device = self.settings.transcription.compute_device.clone();
-        let diarization_enabled = self.settings.diarization.enabled;
+        let diarization_enabled =
+            self.settings.diarization.enabled && self.settings.diarization.engine != "none";
         let diarization_engine = self.settings.diarization.engine.clone();
         let min_speakers = self.settings.diarization.min_speakers;
         let max_speakers = self.settings.diarization.max_speakers;
         let asr_passes = if has_mic && has_system { 2 } else { 1 };
-        let diarization_phase = diarization_enabled && has_system;
+        let diarization_phase = diarization_enabled && has_system && diarization_engine != "none";
         let total_phases = asr_passes + u8::from(diarization_phase);
         self.ml_asr_passes = asr_passes;
         self.ml_total_phases = total_phases;
