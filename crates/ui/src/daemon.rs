@@ -397,7 +397,11 @@ impl winit::application::ApplicationHandler for MacDaemon<'_> {
 /// Запускает macOS-run-loop сервиса.
 #[cfg(target_os = "macos")]
 fn run_macos_loop(app: &mut ScreenRecorderApp, events: &Receiver<Event>) -> Result<(), String> {
-    let event_loop = winit::event_loop::EventLoop::builder()
+    use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+    let mut builder = winit::event_loop::EventLoop::builder();
+    // Сервис без окна не должен занимать Dock; трей остаётся в menu bar.
+    builder.with_activation_policy(ActivationPolicy::Accessory);
+    let event_loop = builder
         .build()
         .map_err(|error| format!("event loop macOS: {error}"))?;
     let mut daemon = MacDaemon {

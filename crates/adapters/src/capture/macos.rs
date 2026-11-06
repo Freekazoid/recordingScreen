@@ -54,7 +54,24 @@ impl MacVideoRecorder {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(log.map(Stdio::from).unwrap_or_else(Stdio::null));
-        let child = command.spawn()?;
+        let mut child = command.spawn()?;
+        // Даём ffmpeg время сообщить об отсутствии разрешения Screen Recording.
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        if let Some(status) = child.try_wait().map_err(CaptureError::Stop)? {
+            let detail = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let tail = detail
+                .lines()
+                .rev()
+                .take(4)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join(" | ");
+            return Err(CaptureError::Spawn(std::io::Error::other(format!(
+                "ffmpeg завершился ({status}): {tail}"
+            ))));
+        }
         self.child = Some(child);
         self.output = Some(output.to_path_buf());
         Ok(())

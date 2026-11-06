@@ -253,7 +253,7 @@ fn spawn_track(
     let target = format!(":{index}");
     let channels_arg = channels.to_string();
     let output_arg = output.to_string_lossy().to_string();
-    let child = Command::new(ffmpeg_binary())
+    let mut child = Command::new(ffmpeg_binary())
         .args([
             "-hide_banner",
             "-loglevel",
@@ -278,6 +278,11 @@ fn spawn_track(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("ffmpeg: {error}"))?;
+    // Устройство может быть недоступно (нет разрешения или занято).
+    thread::sleep(Duration::from_millis(300));
+    if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+        return Err(format!("ffmpeg завершился ({status})"));
+    }
     Ok(Track { child })
 }
 
