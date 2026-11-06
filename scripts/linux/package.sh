@@ -53,13 +53,16 @@ cat > "$APPDIR/usr/share/applications/screenrecorder.desktop" <<'DESKTOP'
 [Desktop Entry]
 Type=Application
 Name=Screen Recorder
-GenericName=Запись экрана
-Comment=Запись экрана, системного звука и микрофона с расшифровкой
+GenericName=Screen recorder
+GenericName[ru]=Запись экрана
+Comment=Record screen, system audio and microphone with transcription
+Comment[ru]=Запись экрана, системного звука и микрофона с расшифровкой
 Exec=screenrecorder
 Icon=screenrecorder
 Terminal=false
 Categories=AudioVideo;Recorder;
-Keywords=screen;recorder;capture;audio;video;запись;экран;
+Keywords=screen;recorder;capture;audio;video;record;recording;
+Keywords[ru]=запись;экран;захват;звук;видео;транскрипция;расшифровка;
 StartupWMClass=screenrecorder
 X-GNOME-UsesNotifications=true
 DESKTOP
@@ -99,16 +102,16 @@ Recommends: libnotify-bin
 Installed-Size: $INSTALLED_KB
 Maintainer: Freekazoid <freekazoid@users.noreply.github.com>
 Homepage: https://github.com/Freekazoid/recordingScreen
-Description: Screen Recorder — запись экрана, звука и расшифровка
- Запись экрана, системного звука и микрофона с распознаванием речи
- и разделением по говорящим.
+Description: Screen Recorder - screen, audio and speech capture
+ Record your screen, system audio and microphone, then transcribe speech
+ and separate it by speaker.
  .
- Возможности:
-  * весь экран, область или выбранное окно;
-  * системный звук и микрофон отдельными дорожками;
-  * экспорт в MP4, MKV, WebM, AVI, MOV и FLV;
-  * Whisper ASR и диаризация sherpa-onnx;
-  * очередь экспорта, история и работа из трея.
+ Features:
+  * full screen, region or selected window;
+  * system audio and microphone as separate tracks;
+  * export to MP4, MKV, WebM, AVI, MOV and FLV;
+  * Whisper ASR and sherpa-onnx diarization;
+  * export queue, recording history and tray operation.
 CONTROL
 dpkg-deb --build --root-owner-group "$PKGROOT" "$OUT/screenrecorder_${VERSION}_${ARCH}.deb"
 

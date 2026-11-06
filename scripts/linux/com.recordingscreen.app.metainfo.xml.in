@@ -3,6 +3,7 @@
   <id>com.recordingscreen.app</id>
   <name>Screen Recorder</name>
   <summary>Запись экрана, звука и расшифровка</summary>
+  <summary xml:lang="en">Screen recorder with speech transcription</summary>
   <developer id="github.com.freekazoid">
     <name>Freekazoid</name>
   </developer>
@@ -20,6 +21,7 @@
     </ul>
   </description>
   <launchable type="desktop-id">screenrecorder.desktop</launchable>
+  <pkgname>screenrecorder</pkgname>
   <url type="homepage">https://github.com/Freekazoid/recordingScreen</url>
   <url type="bugtracker">https://github.com/Freekazoid/recordingScreen/issues</url>
   <url type="vcs-browser">https://github.com/Freekazoid/recordingScreen</url>
@@ -29,13 +31,15 @@
   </categories>
   <keywords>
     <keyword>запись экрана</keyword>
-    <keyword>screen recorder</keyword>
     <keyword>захват экрана</keyword>
     <keyword>транскрипция</keyword>
     <keyword>диаризация</keyword>
+    <keyword>screen recorder</keyword>
+    <keyword>screen capture</keyword>
+    <keyword>transcription</keyword>
+    <keyword>diarization</keyword>
   </keywords>
   <icon type="stock">screenrecorder</icon>
-  <size type="download">21500000</size>
   <provides>
     <binary>screenrecorder</binary>
   </provides>
