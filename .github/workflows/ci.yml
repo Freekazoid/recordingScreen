@@ -103,3 +103,22 @@ jobs:
             done
           fi
           exit "$code"
+
+      - name: Report test failure
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f test.log ]; then
+            body="$(tail -n 200 test.log)"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" -f body="$body" >/dev/null || true
+          fi
+
+      - name: Show test log
+        if: always()
+        shell: bash
+        run: |
+          if [ -f test.log ]; then
+            tail -n 120 test.log >> "$GITHUB_STEP_SUMMARY" || true
+          fi
