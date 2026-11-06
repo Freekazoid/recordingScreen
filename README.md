@@ -22,6 +22,14 @@ cargo build --workspace
 cargo run -p screenrecorder-app
 ```
 
+macOS `.app` (только на macOS):
+
+```bash
+MACOS_TARGET_ARCH=arm64 APP_VERSION=4.0.0-alpha.1 bash scripts/macos/build.sh
+```
+
+Подробности и ограничения — `scripts/macos/README.md`.
+
 Приложение состоит из двух процессов:
 
 - **фоновый сервис** — запись, аудио, очередь, история и трей;
