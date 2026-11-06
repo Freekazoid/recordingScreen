@@ -169,8 +169,11 @@ impl MacAudioRecorder {
     }
 }
 
+/// Устройства AVFoundation: индекс и имя.
+type DeviceList = Vec<(usize, String)>;
+
 /// Список видео- и аудиоустройств AVFoundation.
-fn avfoundation_devices() -> Result<(Vec<(usize, String)>, Vec<(usize, String)>), AudioError> {
+fn avfoundation_devices() -> Result<(DeviceList, DeviceList), AudioError> {
     let output = Command::new(ffmpeg_binary())
         .args([
             "-hide_banner",

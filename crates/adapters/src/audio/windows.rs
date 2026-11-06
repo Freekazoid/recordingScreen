@@ -336,10 +336,10 @@ fn capture_inner(
         }
     };
     let _ = client.stop_stream();
-    if let Err(error) = sink.finalize() {
-        if result.is_ok() {
-            return Err(format!("заголовок WAV: {error}"));
-        }
+    if let Err(error) = sink.finalize()
+        && result.is_ok()
+    {
+        return Err(format!("заголовок WAV: {error}"));
     }
     result
 }
