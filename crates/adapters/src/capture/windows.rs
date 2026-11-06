@@ -131,7 +131,6 @@ fn build_args(fps: u32, output: &Path, region: Option<Region>) -> Vec<String> {
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "warning".to_string(),
-        "-nostdin".to_string(),
         "-y".to_string(),
         "-f".to_string(),
         "gdigrab".to_string(),
