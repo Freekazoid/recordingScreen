@@ -368,6 +368,15 @@ impl winit::application::ApplicationHandler for MacDaemon<'_> {
         self.app.init_hotkeys();
     }
 
+    /// Окон у сервиса нет; событие требуется трейтом winit.
+    fn window_event(
+        &mut self,
+        _event_loop: &winit::event_loop::ActiveEventLoop,
+        _window_id: winit::window::WindowId,
+        _event: winit::event::WindowEvent,
+    ) {
+    }
+
     /// Обслуживает IPC, запись и трей без окна.
     fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         drain_events(self.app, &self.events);

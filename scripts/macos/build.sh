@@ -109,6 +109,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
   <key>CFBundleExecutable</key><string>screenrecorder</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleDevelopmentRegion</key><string>ru</string>
   <key>CFBundleShortVersionString</key><string>${VERSION%%-*}</string>
   <key>CFBundleVersion</key><string>${VERSION//[^0-9.]/}</string>
   <key>CFBundleIconFile</key><string>icon.icns</string>
