@@ -51,6 +51,7 @@ jobs:
         run: |
           choco install llvm cmake nsis -y --no-progress
           "C:\Program Files\LLVM\bin" | Out-File -Append $env:GITHUB_PATH
+          "C:\Program Files\CMake\bin" | Out-File -Append $env:GITHUB_PATH
           "C:\Program Files (x86)\NSIS" | Out-File -Append $env:GITHUB_PATH
       - name: Build Windows packages
         shell: pwsh
@@ -58,7 +59,7 @@ jobs:
           $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
           $version = "4.0.0-alpha.1"
           if ($env:GITHUB_REF_TYPE -eq "tag") { $version = $env:GITHUB_REF_NAME.TrimStart("v") }
-          powershell -ExecutionPolicy Bypass -File scripts/windows/build.ps1 -Version $version -Target x86_64-pc-windows-msvc
+          pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/windows/build.ps1 -Version $version -Target x86_64-pc-windows-msvc
       - name: Show Windows build log
         if: always()
         shell: pwsh

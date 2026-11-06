@@ -21,11 +21,19 @@ trap {
 
 Push-Location $root
 try {
-  & cargo build --release --target $Target -p screenrecorder-app -p screenrecorder-ml-worker -p screenrecorder-diarize 2>&1 |
-    Tee-Object -FilePath $log
-  if ($LASTEXITCODE -ne 0) {
+  $cargo = (Get-Command cargo).Source
+  $cargoArgs = @(
+    "build", "--release", "--target", $Target,
+    "-p", "screenrecorder-app", "-p", "screenrecorder-ml-worker",
+    "-p", "screenrecorder-diarize"
+  )
+  $cargoErr = "$log.err"
+  $process = Start-Process -FilePath $cargo -ArgumentList $cargoArgs -NoNewWindow -Wait -PassThru `
+    -RedirectStandardOutput $log -RedirectStandardError $cargoErr
+  if (Test-Path $cargoErr) { Get-Content $cargoErr | Out-File -Append $log; Remove-Item $cargoErr -Force }
+  if ($process.ExitCode -ne 0) {
     $tail = (Get-Content $log -Tail 25) -join " | "
-    throw "cargo build failed ($LASTEXITCODE): $tail"
+    throw "cargo build failed ($($process.ExitCode)): $tail"
   }
   $bin = Join-Path $root "target\$Target\release"
   Copy-Item (Join-Path $bin "screenrecorder.exe") $dist -Force
@@ -62,11 +70,19 @@ screenrecorder-diarize.exe (sherpa-onnx) и DLL sherpa/onnxruntime.
   $portable = Join-Path $out "ScreenRecorder-$Version-win64-portable.zip"
   if (Test-Path $portable) { Remove-Item $portable -Force }
   Compress-Archive -Path (Join-Path $dist "*") -DestinationPath $portable
-  & makensis /DAPP_VERSION=$Version /DPAYLOAD="$dist" /DOUTDIR="$out" (Join-Path $PSScriptRoot "installer.nsi") 2>&1 |
-    Tee-Object -FilePath $log -Append
-  if ($LASTEXITCODE -ne 0) {
+  $makensis = (Get-Command makensis).Source
+  $installer = Join-Path $PSScriptRoot "installer.nsi"
+  $nsisErr = "$log.nsis.err"
+  $process = Start-Process -FilePath $makensis -ArgumentList @(
+    "/DAPP_VERSION=$Version", "/DPAYLOAD=$dist", "/DOUTDIR=$out", $installer
+  ) -NoNewWindow -Wait -PassThru `
+    -RedirectStandardOutput "$log.nsis" -RedirectStandardError $nsisErr
+  Get-Content "$log.nsis" | Out-File -Append $log
+  if (Test-Path $nsisErr) { Get-Content $nsisErr | Out-File -Append $log; Remove-Item $nsisErr -Force }
+  Remove-Item "$log.nsis" -Force -ErrorAction SilentlyContinue
+  if ($process.ExitCode -ne 0) {
     $tail = (Get-Content $log -Tail 25) -join " | "
-    throw "makensis failed ($LASTEXITCODE): $tail"
+    throw "makensis failed ($($process.ExitCode)): $tail"
   }
   Write-Host "Готово: $out"
 } finally {
