@@ -78,8 +78,15 @@ pub struct ExportRequest {
     pub mic_gain_db: f32,
 }
 
-/// Мягкое усиление тихой микрофонной дорожки.
-const MIC_FILTER: &str = "highpass=f=80,dynaudnorm=f=500:m=15:p=0.95";
+/// Мягкая обработка микрофона: срез низа, шумовой гейт и лимитер.
+const MIC_FILTER: &str =
+    "highpass=f=80,agate=threshold=0.01:ratio=2:attack=20:release=250,alimiter=limit=0.89:level=0";
+
+/// Запас по уровню для системной дорожки перед сведением.
+const MIX_HEADROOM_DB: f32 = -2.0;
+
+/// Финальный лимитер микса: не даёт сумме дорожек уйти в клиппинг.
+const MIX_LIMITER: &str = "alimiter=limit=0.85:level=0:attack=5:release=50";
 
 /// Сводит видео и аудио в итоговый файл.
 pub fn merge_recording(request: &ExportRequest) -> Result<PathBuf, MediaError> {
@@ -158,8 +165,8 @@ pub fn merge_audio(
         args.extend([
             "-filter_complex".to_string(),
             format!(
-                "[{}:a]anull[sys];[{}:a]volume={mic_gain_db:.1}dB,{MIC_FILTER}[mic];\
-                 [sys][mic]amix=inputs=2:normalize=0:duration=longest[aout]",
+                "[{}:a]volume={MIX_HEADROOM_DB:.1}dB[sys];[{}:a]volume={mic_gain_db:.1}dB,{MIC_FILTER}[mic];\
+                 [sys][mic]amix=inputs=2:normalize=0:duration=longest,{MIX_LIMITER}[aout]",
                 inputs[0], inputs[1]
             ),
             "-map".to_string(),
@@ -170,6 +177,16 @@ pub fn merge_audio(
             "-filter_complex".to_string(),
             format!(
                 "[{}:a]volume={mic_gain_db:.1}dB,{MIC_FILTER}[aout]",
+                inputs[0]
+            ),
+            "-map".to_string(),
+            "[aout]".to_string(),
+        ]);
+    } else {
+        args.extend([
+            "-filter_complex".to_string(),
+            format!(
+                "[{}:a]volume={MIX_HEADROOM_DB:.1}dB,{MIX_LIMITER}[aout]",
                 inputs[0]
             ),
             "-map".to_string(),
@@ -236,8 +253,8 @@ fn build_args(request: &ExportRequest) -> Vec<String> {
             args.extend([
                 "-filter_complex".to_string(),
                 format!(
-                    "[{}:a]anull[sys];[{}:a]volume={:.1}dB,{MIC_FILTER}[mic];\
-                     [sys][mic]amix=inputs=2:normalize=0:duration=longest[aout]",
+                    "[{}:a]volume={MIX_HEADROOM_DB:.1}dB[sys];[{}:a]volume={:.1}dB,{MIC_FILTER}[mic];\
+                     [sys][mic]amix=inputs=2:normalize=0:duration=longest,{MIX_LIMITER}[aout]",
                     audio_inputs[0], audio_inputs[1], request.mic_gain_db
                 ),
                 "-map".to_string(),
@@ -259,10 +276,15 @@ fn build_args(request: &ExportRequest) -> Vec<String> {
             ]);
         } else {
             args.extend([
+                "-filter_complex".to_string(),
+                format!(
+                    "[{}:a]volume={MIX_HEADROOM_DB:.1}dB,{MIX_LIMITER}[aout]",
+                    audio_inputs[0]
+                ),
                 "-map".to_string(),
                 "0:v:0".to_string(),
                 "-map".to_string(),
-                format!("{}:a:0", audio_inputs[0]),
+                "[aout]".to_string(),
             ]);
         }
     } else {
@@ -362,13 +384,47 @@ mod tests {
         assert!(args.contains(&"-filter_complex".to_string()));
         assert!(args.contains(&"-itsoffset".to_string()));
         assert!(args.iter().any(|arg| arg.contains("amix=inputs=2")));
-        assert!(args.iter().any(|arg| arg.contains("dynaudnorm")));
+        assert!(args.iter().any(|arg| arg.contains("agate=")));
+        assert!(args.iter().any(|arg| arg.contains("alimiter=")));
+        assert!(
+            args.iter().any(|arg| arg.contains("volume=-2.0dB")),
+            "системной дорожке нужен запас по уровню"
+        );
+        assert!(
+            args.iter().all(|arg| !arg.contains("dynaudnorm")),
+            "dynaudnorm слишком усиливает шум в паузах"
+        );
         assert!(
             args.iter().filter(|arg| *arg == "-threads").count() >= 2,
             "экспорт должен ограничивать потоки"
         );
         assert!(args.contains(&"aac".to_string()));
         assert_eq!(args.last(), Some(&"/tmp/out.mp4".to_string()));
+    }
+
+    /// Проверяет экспорт только с микрофоном: без системной дорожки.
+    #[test]
+    fn builds_mic_only_command() {
+        let request = ExportRequest {
+            video: PathBuf::from("/tmp/screen.mkv"),
+            system_audio: None,
+            mic_audio: Some(PathBuf::from("/tmp/mic.wav")),
+            output: PathBuf::from("/tmp/out.mp4"),
+            format: "mp4".to_string(),
+            crf: 23,
+            audio_mode: "aac".to_string(),
+            audio_offset_ms: 0,
+            mic_gain_db: 3.0,
+        };
+        let args = build_args(&request);
+        let filter = args
+            .iter()
+            .find(|arg| arg.contains("highpass"))
+            .expect("фильтр микрофона");
+        assert!(filter.contains("volume=3.0dB"));
+        assert!(filter.contains("agate="));
+        assert!(filter.contains("alimiter="));
+        assert!(!filter.contains("dynaudnorm"));
     }
 
     /// Проверяет режим без звука.

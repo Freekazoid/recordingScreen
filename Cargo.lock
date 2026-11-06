@@ -4253,7 +4253,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "screenrecorder-adapters"
-version = "4.0.0-alpha.2"
+version = "4.0.0-alpha.3"
 dependencies = [
  "ashpd",
  "directories",
@@ -4276,7 +4276,7 @@ dependencies = [
 
 [[package]]
 name = "screenrecorder-app"
-version = "4.0.0-alpha.2"
+version = "4.0.0-alpha.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4293,7 +4293,7 @@ dependencies = [
 
 [[package]]
 name = "screenrecorder-application"
-version = "4.0.0-alpha.2"
+version = "4.0.0-alpha.3"
 dependencies = [
  "chrono",
  "libc",
@@ -4309,7 +4309,7 @@ dependencies = [
 
 [[package]]
 name = "screenrecorder-diarize"
-version = "4.0.0-alpha.2"
+version = "4.0.0-alpha.3"
 dependencies = [
  "anyhow",
  "hound",
@@ -4322,7 +4322,7 @@ dependencies = [
 
 [[package]]
 name = "screenrecorder-domain"
-version = "4.0.0-alpha.2"
+version = "4.0.0-alpha.3"
 dependencies = [
  "chrono",
  "serde",
@@ -4332,7 +4332,7 @@ dependencies = [
 
 [[package]]
 name = "screenrecorder-ml"
-version = "4.0.0-alpha.2"
+version = "4.0.0-alpha.3"
 dependencies = [
  "hound",
  "screenrecorder-domain",
@@ -4343,7 +4343,7 @@ dependencies = [
 
 [[package]]
 name = "screenrecorder-ml-worker"
-version = "4.0.0-alpha.2"
+version = "4.0.0-alpha.3"
 dependencies = [
  "anyhow",
  "screenrecorder-ml",
@@ -4354,7 +4354,7 @@ dependencies = [
 
 [[package]]
 name = "screenrecorder-nemo"
-version = "4.0.0-alpha.2"
+version = "4.0.0-alpha.3"
 dependencies = [
  "anyhow",
  "hound",
@@ -4366,7 +4366,7 @@ dependencies = [
 
 [[package]]
 name = "screenrecorder-ui"
-version = "4.0.0-alpha.2"
+version = "4.0.0-alpha.3"
 dependencies = [
  "ashpd",
  "chrono",

@@ -87,6 +87,13 @@ struct StopOutcome {
     was_wayland_active: bool,
 }
 
+/// Результат фоновой финализации манифеста.
+struct FinalizeOutcome {
+    dir: PathBuf,
+    manifest: SessionManifest,
+    save_error: Option<String>,
+}
+
 /// Результат фонового распознавания.
 struct TranscriptOutput {
     text_path: PathBuf,
@@ -230,6 +237,7 @@ pub struct ScreenRecorderApp {
     export_rx: Option<Receiver<Result<PathBuf, String>>>,
     exporting: bool,
     stop_rx: Option<Receiver<StopOutcome>>,
+    finalize_rx: Option<Receiver<FinalizeOutcome>>,
     stopping: bool,
     quit_after_stop: bool,
     audio_offset_ms: i64,
@@ -274,6 +282,118 @@ pub struct ScreenRecorderApp {
     portal_parent_tx: Option<Sender<u64>>,
     #[cfg(target_os = "linux")]
     hotkey_parent_sent: bool,
+}
+
+/// Финализирует манифест записи: анализ дорожек и сохранение JSON.
+///
+/// Выполняется в отдельном потоке: `analyze_track` читает WAV целиком,
+/// а на длинной записи это сотни мегабайт. Главный цикл сервиса в это
+/// время должен оставаться доступным для окна и трея.
+fn finalize_session(
+    dir: PathBuf,
+    mut manifest: SessionManifest,
+    audio_offset_ms: i64,
+    audio_only: bool,
+) -> FinalizeOutcome {
+    manifest.audio_offset_ms = audio_offset_ms;
+    if !audio_only {
+        let video = dir.join("screen.mkv");
+        let ready = std::fs::metadata(&video).is_ok_and(|meta| meta.len() > 0);
+        manifest.add_track(TrackManifest {
+            kind: TrackKind::Screen,
+            path: "screen.mkv".to_string(),
+            device: None,
+            sample_rate: None,
+            channels: None,
+            duration_ms: None,
+            start_offset_ms: 0,
+            status: if ready {
+                TrackStatus::Ready
+            } else {
+                TrackStatus::Failed
+            },
+            stats: TrackStats::default(),
+        });
+        if !ready {
+            manifest.warn("Видеофайл не создан или пуст.");
+        }
+    }
+
+    let mut warnings = Vec::new();
+    let mut silent = Vec::new();
+    let mut any_ready = false;
+    for track in &mut manifest.tracks {
+        if !matches!(track.kind, TrackKind::System | TrackKind::Mic) {
+            continue;
+        }
+        let path = dir.join(&track.path);
+        match analyze_track(&path) {
+            Ok(analysis) => {
+                track.duration_ms = Some(analysis.duration_ms);
+                track.stats = analysis.stats;
+                let is_silent =
+                    analysis.stats.silence_ratio >= 0.98 && analysis.stats.rms_dbfs < -60.0;
+                track.status = if is_silent {
+                    TrackStatus::Silent
+                } else {
+                    TrackStatus::Ready
+                };
+                any_ready = true;
+                if is_silent {
+                    silent.push(match track.kind {
+                        TrackKind::System => "системный звук",
+                        TrackKind::Mic => "микрофон",
+                        _ => "аудио",
+                    });
+                }
+            }
+            Err(error) => {
+                track.status = TrackStatus::Failed;
+                warnings.push(format!("{}: {error}", track.path));
+            }
+        }
+    }
+    for warning in warnings {
+        manifest.warn(warning);
+    }
+    if manifest
+        .tracks
+        .iter()
+        .any(|track| track.kind == TrackKind::Screen && track.status == TrackStatus::Ready)
+    {
+        any_ready = true;
+    }
+    match silent.as_slice() {
+        [one] => manifest.warn(format!(
+            "{one} записан тихо; вторая дорожка продолжает работать."
+        )),
+        [_, _, ..] => {
+            manifest.warn("Обе аудиодорожки тихие: проверьте устройства и уровень сигнала.")
+        }
+        [] => {}
+    }
+    manifest.finish(if any_ready {
+        ManifestState::Recorded
+    } else {
+        ManifestState::Failed
+    });
+    let save_error = save_manifest(&dir, &manifest)
+        .err()
+        .map(|error| format!("Не удалось сохранить манифест: {error}"));
+    append_session_log(
+        &dir,
+        &format!(
+            "стоп: state={:?}, дорожек={}, предупреждений={}",
+            manifest.state,
+            manifest.tracks.len(),
+            manifest.warnings.len()
+        ),
+    );
+    FinalizeOutcome {
+        dir,
+        manifest,
+        save_error,
+    }
 }
 
 impl ScreenRecorderApp {
@@ -411,6 +531,7 @@ impl ScreenRecorderApp {
             export_rx: None,
             exporting: false,
             stop_rx: None,
+            finalize_rx: None,
             stopping: false,
             quit_after_stop: false,
             audio_offset_ms: 0,
@@ -1150,110 +1271,6 @@ impl ScreenRecorderApp {
     }
 
     /// Считает статистику дорожек, завершает манифест и сохраняет его.
-    fn finalize_manifest(&mut self, audio_only: bool) {
-        let Some(dir) = self.session_dir.clone() else {
-            return;
-        };
-        let Some(mut manifest) = self.manifest.take() else {
-            return;
-        };
-        manifest.audio_offset_ms = self.audio_offset_ms;
-        if !audio_only {
-            let video = dir.join("screen.mkv");
-            let ready = std::fs::metadata(&video).is_ok_and(|meta| meta.len() > 0);
-            manifest.add_track(TrackManifest {
-                kind: TrackKind::Screen,
-                path: "screen.mkv".to_string(),
-                device: None,
-                sample_rate: None,
-                channels: None,
-                duration_ms: None,
-                start_offset_ms: 0,
-                status: if ready {
-                    TrackStatus::Ready
-                } else {
-                    TrackStatus::Failed
-                },
-                stats: TrackStats::default(),
-            });
-            if !ready {
-                manifest.warn("Видеофайл не создан или пуст.");
-            }
-        }
-
-        let mut warnings = Vec::new();
-        let mut silent = Vec::new();
-        let mut any_ready = false;
-        for track in &mut manifest.tracks {
-            if !matches!(track.kind, TrackKind::System | TrackKind::Mic) {
-                continue;
-            }
-            let path = dir.join(&track.path);
-            match analyze_track(&path) {
-                Ok(analysis) => {
-                    track.duration_ms = Some(analysis.duration_ms);
-                    track.stats = analysis.stats;
-                    let is_silent =
-                        analysis.stats.silence_ratio >= 0.98 && analysis.stats.rms_dbfs < -60.0;
-                    track.status = if is_silent {
-                        TrackStatus::Silent
-                    } else {
-                        TrackStatus::Ready
-                    };
-                    any_ready = true;
-                    if is_silent {
-                        silent.push(match track.kind {
-                            TrackKind::System => "системный звук",
-                            TrackKind::Mic => "микрофон",
-                            _ => "аудио",
-                        });
-                    }
-                }
-                Err(error) => {
-                    track.status = TrackStatus::Failed;
-                    warnings.push(format!("{}: {error}", track.path));
-                }
-            }
-        }
-        for warning in warnings {
-            manifest.warn(warning);
-        }
-        if manifest
-            .tracks
-            .iter()
-            .any(|track| track.kind == TrackKind::Screen && track.status == TrackStatus::Ready)
-        {
-            any_ready = true;
-        }
-        match silent.as_slice() {
-            [one] => manifest.warn(format!(
-                "{one} записан тихо; вторая дорожка продолжает работать."
-            )),
-            [_, _, ..] => {
-                manifest.warn("Обе аудиодорожки тихие: проверьте устройства и уровень сигнала.")
-            }
-            [] => {}
-        }
-        manifest.finish(if any_ready {
-            ManifestState::Recorded
-        } else {
-            ManifestState::Failed
-        });
-        if let Err(error) = save_manifest(&dir, &manifest) {
-            self.log = format!("Не удалось сохранить манифест: {error}");
-        }
-        append_session_log(
-            &dir,
-            &format!(
-                "стоп: state={:?}, дорожек={}, предупреждений={}",
-                manifest.state,
-                manifest.tracks.len(),
-                manifest.warnings.len()
-            ),
-        );
-        self.sync_history(&dir);
-    }
-
     /// Открывает нативный диалог выбора каталога.
     fn pick_folder(&mut self, target: FolderTarget) {
         if self.folder_rx.is_some() {
@@ -2200,17 +2217,78 @@ impl ScreenRecorderApp {
                 );
             }
         }
-        let finalize_started = Instant::now();
-        self.finalize_manifest(outcome.audio_only);
-        tracing::info!(
-            elapsed_ms = finalize_started.elapsed().as_millis(),
-            "манифест финализирован"
-        );
-        if let Some(session_dir) = self.session_dir.clone() {
-            append_session_log(&session_dir, "остановка записи");
-            self.enqueue_export(&session_dir);
+        if self.start_finalize(outcome.audio_only) {
+            return;
         }
         self.stopping = false;
+        self.finish_quit_after_stop();
+    }
+
+    /// Запускает фоновую финализацию текущей сессии.
+    ///
+    /// Возвращает `true`, если анализ уже идёт или запущен. Пока поток
+    /// читает WAV, `stopping` остаётся включённым и новые записи не стартуют.
+    fn start_finalize(&mut self, audio_only: bool) -> bool {
+        if self.finalize_rx.is_some() {
+            return true;
+        }
+        let Some(dir) = self.session_dir.clone() else {
+            return false;
+        };
+        let Some(manifest) = self.manifest.take() else {
+            return false;
+        };
+        append_session_log(&dir, "остановка записи");
+        let audio_offset_ms = self.audio_offset_ms;
+        let (sender, receiver) = mpsc::channel();
+        self.finalize_rx = Some(receiver);
+        self.stopping = true;
+        self.status = "Сохранение записи…".to_string();
+        tracing::info!(dir = %dir.display(), "старт фоновой финализации");
+        std::thread::spawn(move || {
+            let result = finalize_session(dir, manifest, audio_offset_ms, audio_only);
+            let _ = sender.send(result);
+        });
+        true
+    }
+
+    /// Забирает результат фоновой финализации и запускает экспорт.
+    fn poll_finalize(&mut self) {
+        let outcome = match &self.finalize_rx {
+            Some(receiver) => match receiver.try_recv() {
+                Ok(outcome) => outcome,
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    self.finalize_rx = None;
+                    self.stopping = false;
+                    self.status = "Сохранение манифеста прервано".to_string();
+                    self.log = "Поток сохранения записи завершился.".to_string();
+                    if let Some(dir) = self.session_dir.clone() {
+                        self.enqueue_export(&dir);
+                    }
+                    self.finish_quit_after_stop();
+                    return;
+                }
+            },
+            None => return,
+        };
+        self.finalize_rx = None;
+        let FinalizeOutcome {
+            dir,
+            manifest,
+            save_error,
+        } = outcome;
+        self.manifest = Some(manifest);
+        if let Some(error) = save_error {
+            self.status = "Ошибка сохранения манифеста".to_string();
+            self.log = error;
+        } else {
+            self.status = "Запись сохранена".to_string();
+            self.log = format!("Запись сохранена: {}", dir.display());
+        }
+        self.sync_history(&dir);
+        self.stopping = false;
+        self.enqueue_export(&dir);
         self.finish_quit_after_stop();
     }
 
@@ -2285,7 +2363,12 @@ impl ScreenRecorderApp {
 
     /// Запускает следующую восстановленную задачу из очереди.
     fn poll_job_queue(&mut self) {
-        if self.exporting || self.transcribing || self.recording || self.preflight_rx.is_some() {
+        if self.exporting
+            || self.transcribing
+            || self.recording
+            || self.preflight_rx.is_some()
+            || self.stopping
+        {
             return;
         }
         let Some(job) = self.queued_jobs.first().cloned() else {
@@ -2903,8 +2986,9 @@ impl ScreenRecorderApp {
                     self.status = "Запись завершена".to_string();
                     self.log = "Запись завершилась. Проверьте файлы сессии.".to_string();
                 }
-                self.finalize_manifest(audio_only);
-                if let Some(session_dir) = self.session_dir.clone() {
+                if !self.start_finalize(audio_only)
+                    && let Some(session_dir) = self.session_dir.clone()
+                {
                     self.enqueue_export(&session_dir);
                 }
                 if self.using_wayland {
@@ -4259,6 +4343,7 @@ impl ScreenRecorderApp {
         self.send_hotkey_parent();
         self.poll_daemon(ctx);
         self.poll_stop();
+        self.poll_finalize();
         self.refresh_history();
         self.poll_download();
         self.poll_folder_picker();
@@ -4275,7 +4360,9 @@ impl ScreenRecorderApp {
 
     /// Обслуживает запись, очередь и трей в фоновом сервисе.
     fn tick_daemon(&mut self) {
+        let tick_started = Instant::now();
         self.poll_stop();
+        self.poll_finalize();
         if self.last_state_log.elapsed() >= Duration::from_secs(60) {
             self.last_state_log = Instant::now();
             if self.recording || self.exporting || self.transcribing || !self.queued_jobs.is_empty()
@@ -4304,6 +4391,10 @@ impl ScreenRecorderApp {
         self.sync_tray_state();
         self.poll_area();
         self.poll_export();
+        let elapsed = tick_started.elapsed();
+        if elapsed >= Duration::from_millis(250) {
+            tracing::warn!(elapsed_ms = elapsed.as_millis(), "долгий тик сервиса");
+        }
     }
 
     /// Запрашивает снимок состояния у фонового сервиса.
@@ -4739,12 +4830,26 @@ fn microphone_gain_db(session_dir: &Path) -> f32 {
     else {
         return 0.0;
     };
-    let rms = track.stats.rms_dbfs;
-    if rms.is_finite() && rms < -24.0 {
-        (-26.0 - rms).clamp(0.0, 18.0)
-    } else {
-        0.0
+    mic_gain_from_stats(
+        track.stats.rms_dbfs,
+        track.stats.peak_dbfs,
+        track.stats.silence_ratio,
+    )
+}
+
+/// Выбирает усиление по статистике микрофонной дорожки.
+///
+/// Общий RMS обманчив: в длинной записи с редкой речью он низкий,
+/// хотя пики уже могут быть у 0 dBFS. Поэтому почти пустую или горячую
+/// дорожку не усиливаем; для тихой речи оставляем максимум +12 dB.
+fn mic_gain_from_stats(rms_dbfs: f32, peak_dbfs: f32, silence_ratio: f32) -> f32 {
+    if !rms_dbfs.is_finite() || !peak_dbfs.is_finite() || !silence_ratio.is_finite() {
+        return 0.0;
     }
+    if silence_ratio > 0.90 || peak_dbfs > -3.0 {
+        return 0.0;
+    }
+    (-26.0 - rms_dbfs).clamp(0.0, 12.0)
 }
 
 /// Выбирает существующий каталог для старта диалога.
@@ -5374,5 +5479,30 @@ mod tests {
             std::fs::read_to_string(dir.path().join("video.txt")).expect("txt"),
             "txt"
         );
+    }
+
+    /// Почти пустую дорожку не усиливаем: общий RMS обманчив.
+    #[test]
+    fn mic_gain_skips_silent_recording() {
+        assert_eq!(mic_gain_from_stats(-46.3, -1.5, 0.975), 0.0);
+    }
+
+    /// Горячий сигнал с пиками у 0 dBFS не усиливаем.
+    #[test]
+    fn mic_gain_skips_hot_signal() {
+        assert_eq!(mic_gain_from_stats(-30.0, -2.0, 0.4), 0.0);
+    }
+
+    /// Тихая речь с нормальным запасом получает усиление.
+    #[test]
+    fn mic_gain_boosts_quiet_speech() {
+        let gain = mic_gain_from_stats(-34.0, -12.0, 0.5);
+        assert!((gain - 8.0).abs() < 0.01, "ожидалось 8 dB, получено {gain}");
+    }
+
+    /// Усиление ограничено 12 dB.
+    #[test]
+    fn mic_gain_is_limited() {
+        assert_eq!(mic_gain_from_stats(-70.0, -20.0, 0.5), 12.0);
     }
 }

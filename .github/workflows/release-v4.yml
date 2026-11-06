@@ -11,7 +11,7 @@ permissions:
   issues: write
 
 env:
-  APP_VERSION: 4.0.0-alpha.2
+  APP_VERSION: 4.0.0-alpha.3
 
 jobs:
   linux:
@@ -33,7 +33,7 @@ jobs:
       - name: Build Linux packages
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then VERSION="4.0.0-alpha.2"; fi
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then VERSION="4.0.0-alpha.3"; fi
           bash scripts/linux/package.sh "$VERSION"
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
@@ -64,7 +64,7 @@ jobs:
         shell: pwsh
         run: |
           $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
-          $version = "4.0.0-alpha.2"
+          $version = "4.0.0-alpha.3"
           if ($env:GITHUB_REF_TYPE -eq "tag") { $version = $env:GITHUB_REF_NAME.TrimStart("v") }
           & ./scripts/windows/build.ps1 -Version $version -Target x86_64-pc-windows-msvc
       - name: Show Windows build log
@@ -130,7 +130,7 @@ jobs:
       - name: Build macOS app
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then VERSION="4.0.0-alpha.2"; fi
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then VERSION="4.0.0-alpha.3"; fi
           APP_VERSION="$VERSION" bash scripts/macos/build.sh
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
@@ -153,7 +153,7 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'v4.0.0-alpha.2-ci' }}
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'v4.0.0-alpha.3-ci' }}
           name: ${{ github.ref_type == 'tag' && github.ref_name || 'Screen Recorder 4.0 alpha CI' }}
           prerelease: ${{ github.ref_type != 'tag' }}
           files: artifacts/*

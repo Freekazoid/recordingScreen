@@ -25,7 +25,7 @@ cargo run -p screenrecorder-app
 macOS `.app` (только на macOS):
 
 ```bash
-MACOS_TARGET_ARCH=arm64 APP_VERSION=4.0.0-alpha.2 bash scripts/macos/build.sh
+MACOS_TARGET_ARCH=arm64 APP_VERSION=4.0.0-alpha.3 bash scripts/macos/build.sh
 ```
 
 Подробности и ограничения — `scripts/macos/README.md`.
