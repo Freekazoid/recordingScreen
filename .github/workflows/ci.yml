@@ -53,6 +53,10 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Reset sherpa native cache
+        shell: bash
+        run: rm -rf target/sherpa-onnx-prebuilt
+
       - name: Format
         run: cargo fmt --all -- --check
 

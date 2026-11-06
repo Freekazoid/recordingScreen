@@ -27,6 +27,9 @@ jobs:
             cmake clang libclang-dev pkg-config \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libx11-dev libxcb1-dev libgl1-mesa-dev
+      - name: Reset sherpa native cache
+        shell: bash
+        run: rm -rf target/sherpa-onnx-prebuilt
       - name: Build Linux packages
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -54,6 +57,9 @@ jobs:
           "C:\Program Files\LLVM\bin" | Out-File -Append $env:GITHUB_PATH
           "C:\Program Files\CMake\bin" | Out-File -Append $env:GITHUB_PATH
           "C:\Program Files (x86)\NSIS" | Out-File -Append $env:GITHUB_PATH
+      - name: Reset sherpa native cache
+        shell: pwsh
+        run: if (Test-Path target/sherpa-onnx-prebuilt) { Remove-Item target/sherpa-onnx-prebuilt -Recurse -Force }
       - name: Build Windows packages
         shell: pwsh
         run: |
@@ -118,6 +124,9 @@ jobs:
         run: |
           brew install cmake llvm
           echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+      - name: Reset sherpa native cache
+        shell: bash
+        run: rm -rf target/sherpa-onnx-prebuilt
       - name: Build macOS app
         run: |
           VERSION="${GITHUB_REF_NAME#v}"

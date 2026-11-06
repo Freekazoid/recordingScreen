@@ -21,6 +21,10 @@ trap {
 
 Push-Location $root
 try {
+  # Кэш нативных библиотек sherpa мог сохраниться от другой разрядности/режима.
+  if (Test-Path (Join-Path $root "target\sherpa-onnx-prebuilt")) {
+    Remove-Item (Join-Path $root "target\sherpa-onnx-prebuilt") -Recurse -Force
+  }
   $cargo = (Get-Command cargo).Source
   $cargoArgs = @(
     "build", "--release", "--target", $Target,
