@@ -9,6 +9,7 @@ APPDIR="$OUT/ScreenRecorder.AppDir"
 PKGROOT="$OUT/deb-root"
 ARCH="amd64"
 APPIMAGE_ARCH="x86_64"
+BUILD_DATE="$(date +%F)"
 
 cd "$ROOT"
 
@@ -44,16 +45,23 @@ install -m755 target/release/screenrecorder-diarize "$APPDIR/usr/bin/"
 install -m755 bin/linux/ffmpeg "$APPDIR/usr/bin/ffmpeg"
 install -m755 bin/linux/ffprobe "$APPDIR/usr/bin/ffprobe"
 install -m644 assets/icon.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/screenrecorder.png"
+mkdir -p "$APPDIR/usr/share/metainfo"
+sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$BUILD_DATE/g" \
+  scripts/linux/com.recordingscreen.app.metainfo.xml.in \
+  > "$APPDIR/usr/share/metainfo/com.recordingscreen.app.metainfo.xml"
 cat > "$APPDIR/usr/share/applications/screenrecorder.desktop" <<'DESKTOP'
 [Desktop Entry]
 Type=Application
 Name=Screen Recorder
-Comment=Запись экрана, системного звука и микрофона
+GenericName=Запись экрана
+Comment=Запись экрана, системного звука и микрофона с расшифровкой
 Exec=screenrecorder
 Icon=screenrecorder
 Terminal=false
 Categories=AudioVideo;Recorder;
+Keywords=screen;recorder;capture;audio;video;запись;экран;
 StartupWMClass=screenrecorder
+X-GNOME-UsesNotifications=true
 DESKTOP
 cat > "$APPDIR/AppRun" <<'APPRUN'
 #!/usr/bin/env bash
@@ -70,12 +78,16 @@ if ! ARCH="$APPIMAGE_ARCH" "$APPIMAGETOOL" "$APPDIR" "$OUT/ScreenRecorder-$VERSI
 fi
 
 mkdir -p "$PKGROOT/DEBIAN" "$PKGROOT/usr/bin" "$PKGROOT/usr/share/applications" \
-  "$PKGROOT/usr/share/icons/hicolor/256x256/apps"
+  "$PKGROOT/usr/share/icons/hicolor/256x256/apps" "$PKGROOT/usr/share/metainfo" \
+  "$PKGROOT/usr/share/doc/screenrecorder"
 install -m755 target/release/screenrecorder "$PKGROOT/usr/bin/"
 install -m755 target/release/screenrecorder-ml "$PKGROOT/usr/bin/"
 install -m755 target/release/screenrecorder-diarize "$PKGROOT/usr/bin/"
 install -m644 assets/icon.png "$PKGROOT/usr/share/icons/hicolor/256x256/apps/screenrecorder.png"
 install -m644 "$APPDIR/usr/share/applications/screenrecorder.desktop" "$PKGROOT/usr/share/applications/"
+install -m644 "$APPDIR/usr/share/metainfo/com.recordingscreen.app.metainfo.xml" "$PKGROOT/usr/share/metainfo/"
+install -m644 LICENSE "$PKGROOT/usr/share/doc/screenrecorder/copyright"
+INSTALLED_KB="$(du -sk "$PKGROOT/usr" | cut -f1)"
 cat > "$PKGROOT/DEBIAN/control" <<CONTROL
 Package: screenrecorder
 Version: $VERSION
@@ -83,9 +95,20 @@ Section: video
 Priority: optional
 Architecture: $ARCH
 Depends: ffmpeg, pipewire-bin, x11-utils, libxkbcommon0, libwayland-client0, libx11-6, libxcb1
-Maintainer: Freekazoid
-Description: Screen Recorder 4
- Запись экрана, системного звука и микрофона с распознаванием речи.
+Recommends: libnotify-bin
+Installed-Size: $INSTALLED_KB
+Maintainer: Freekazoid <freekazoid@users.noreply.github.com>
+Homepage: https://github.com/Freekazoid/recordingScreen
+Description: Screen Recorder — запись экрана, звука и расшифровка
+ Запись экрана, системного звука и микрофона с распознаванием речи
+ и разделением по говорящим.
+ .
+ Возможности:
+  * весь экран, область или выбранное окно;
+  * системный звук и микрофон отдельными дорожками;
+  * экспорт в MP4, MKV, WebM, AVI, MOV и FLV;
+  * Whisper ASR и диаризация sherpa-onnx;
+  * очередь экспорта, история и работа из трея.
 CONTROL
 dpkg-deb --build --root-owner-group "$PKGROOT" "$OUT/screenrecorder_${VERSION}_${ARCH}.deb"
 
