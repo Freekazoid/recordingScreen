@@ -70,6 +70,17 @@ jobs:
           fi
           exit "$code"
 
+      - name: Report clippy failure
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f clippy.log ]; then
+            body="$(tail -n 100 clippy.log)"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" -f body="$body" >/dev/null || true
+          fi
+
       - name: Show clippy log
         if: always()
         shell: bash
