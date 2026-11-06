@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Freekazoid/recordingScreen/contracts/job.schema.json",
+  "title": "Job",
+  "type": "object",
+  "required": ["id", "session_id", "kind", "state", "attempts", "created_at", "updated_at"],
+  "properties": {
+    "id": { "type": "string" },
+    "session_id": { "type": "string" },
+    "kind": { "type": "string" },
+    "state": {
+      "type": "string",
+      "enum": ["queued", "running", "succeeded", "failed", "cancelled"]
+    },
+    "attempts": { "type": "integer", "minimum": 0 },
+    "last_error": { "type": ["string", "null"] },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}

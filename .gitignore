@@ -16,6 +16,7 @@ test/
 .temp_segments/
 
 # Артефакты тестов и записи
+testdata/av-sync/
 audio.wav
 output.mkv
 test_*.wav
@@ -62,6 +63,8 @@ venv.bak/
 .python/
 tools/
 output/
+# Rust
+target/
 
 # ========== IDE ==========
 .vscode/
@@ -133,6 +136,11 @@ poetry.lock
 
 # ========== Documentation ==========
 docs/_build/
+# Локальные проектные документы и память (не коммитим)
+PROJECT_MEMORY.md
+roadmap.md
+docs/
 # Local _tkinter build SDK
 .sdk/
 logs/
+.tavily/

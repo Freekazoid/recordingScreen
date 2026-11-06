@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Freekazoid/recordingScreen/contracts/session.schema.json",
+  "title": "Session",
+  "type": "object",
+  "required": ["id", "title", "state", "created_at", "output_dir"],
+  "properties": {
+    "id": { "type": "string" },
+    "title": { "type": "string" },
+    "state": {
+      "type": "string",
+      "enum": [
+        "created",
+        "preparing",
+        "recording",
+        "finalizing",
+        "recorded",
+        "processing",
+        "transcribed",
+        "exported",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "started_at": { "type": ["string", "null"], "format": "date-time" },
+    "ended_at": { "type": ["string", "null"], "format": "date-time" },
+    "output_dir": { "type": "string" }
+  },
+  "additionalProperties": false
+}

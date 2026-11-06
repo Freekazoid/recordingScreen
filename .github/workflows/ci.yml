@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "rewrite/**"]
+  pull_request:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux GUI deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev \
+            libgl1-mesa-dev clang libclang-dev cmake
+
+      - name: Install Windows native deps
+        if: runner.os == 'Windows'
+        run: choco install llvm cmake -y --no-progress
+        shell: pwsh
+
+      - name: Install macOS native deps
+        if: runner.os == 'macOS'
+        run: brew install llvm cmake
+
+      - name: Configure libclang
+        if: runner.os == 'Windows'
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+        shell: pwsh
+
+      - name: Configure libclang
+        if: runner.os == 'macOS'
+        run: echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Reset sherpa native cache
+        shell: bash
+        run: rm -rf target/sherpa-onnx-prebuilt
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        shell: bash
+        run: |
+          set +e
+          cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee clippy.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E '^(error|warning):' clippy.log | head -20 | while IFS= read -r line; do
+              line="${line//'%'/'%25'}"
+              line="${line//$'\n'/'%0A'}"
+              echo "::error::$line"
+            done
+          fi
+          exit "$code"
+
+      - name: Report clippy failure
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f clippy.log ]; then
+            body="$(tail -n 100 clippy.log)"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" -f body="$body" >/dev/null || true
+          fi
+
+      - name: Show clippy log
+        if: always()
+        shell: bash
+        run: |
+          if [ -f clippy.log ]; then
+            tail -n 80 clippy.log >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+
+      - name: Test
+        shell: bash
+        run: |
+          set +e
+          cargo test --workspace --exclude screenrecorder-nemo 2>&1 | tee test.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E '^(test .*FAILED|failures:|thread .*panicked|assertion|error:)' test.log | head -30 | while IFS= read -r line; do
+              line="${line//'%'/'%25'}"
+              line="${line//$'\n'/'%0A'}"
+              echo "::error::$line"
+            done
+          fi
+          exit "$code"
+
+      - name: Report test failure
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f test.log ]; then
+            body="$(tail -n 200 test.log)"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" -f body="$body" >/dev/null || true
+          fi
+
+      - name: Show test log
+        if: always()
+        shell: bash
+        run: |
+          if [ -f test.log ]; then
+            tail -n 120 test.log >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+
+      - name: Report failure to issue
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          body=""
+          if [ -f clippy.log ]; then body="$(tail -n 150 clippy.log)"; fi
+          if [ -f test.log ]; then body="$body$(tail -n 200 test.log)"; fi
+          if [ -n "$body" ]; then
+            payload="$(jq -Rs --arg title "CI failure ${GITHUB_SHA:0:7}" '{title:$title, body:.}' <<< "$body")"
+            curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues" -d "$payload" >/dev/null
+          fi

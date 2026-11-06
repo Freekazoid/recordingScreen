@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "language": "ru",
+  "output_dir": "",
+  "models_dir": "",
+  "capture": {
+    "fps": 20,
+    "video_codec": "h264",
+    "audio_sample_rate": 48000,
+    "audio_channels": 2,
+    "mic_device": "",
+    "system_device": ""
+  },
+  "export": {
+    "format": "mp4",
+    "video_quality": "Хорошее (CRF 23)",
+    "audio_mode": "Без пережатия"
+  },
+  "transcription": {
+    "enabled": true,
+    "engine": "whisper-rs",
+    "model": "large-v3-turbo",
+    "language": "auto",
+    "vad": "sherpa-onnx",
+    "compute_device": "auto"
+  },
+  "diarization": {
+    "engine": "sherpa-onnx",
+    "enabled": true,
+    "min_speakers": null,
+    "max_speakers": null
+  },
+  "privacy": {
+    "cloud_enabled": false
+  },
+  "ui": {
+    "theme": "system"
+  },
+  "hotkeys": {
+    "fullscreen": "Ctrl+Shift+1",
+    "area": "Ctrl+Shift+2",
+    "program": "Ctrl+Shift+3",
+    "audio_only": "Ctrl+Shift+4",
+    "stop": "Ctrl+Shift+5"
+  }
+}

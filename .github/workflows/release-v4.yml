@@ -1,0 +1,160 @@
+name: Release v4
+
+on:
+  push:
+    branches: [rewrite/v4]
+    tags: ['v4*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  APP_VERSION: 4.0.0-alpha.3
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            cmake clang libclang-dev pkg-config \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libxcb1-dev libgl1-mesa-dev
+      - name: Reset sherpa native cache
+        shell: bash
+        run: rm -rf target/sherpa-onnx-prebuilt
+      - name: Build Linux packages
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then VERSION="4.0.0-alpha.3"; fi
+          bash scripts/linux/package.sh "$VERSION"
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenrecorder-linux
+          path: |
+            dist/*.deb
+            dist/*.AppImage
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install native deps
+        shell: pwsh
+        run: |
+          choco install llvm cmake nsis -y --no-progress
+          "C:\Program Files\LLVM\bin" | Out-File -Append $env:GITHUB_PATH
+          "C:\Program Files\CMake\bin" | Out-File -Append $env:GITHUB_PATH
+          "C:\Program Files (x86)\NSIS" | Out-File -Append $env:GITHUB_PATH
+      - name: Reset sherpa native cache
+        shell: pwsh
+        run: if (Test-Path target/sherpa-onnx-prebuilt) { Remove-Item target/sherpa-onnx-prebuilt -Recurse -Force }
+      - name: Build Windows packages
+        shell: pwsh
+        run: |
+          $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
+          $version = "4.0.0-alpha.3"
+          if ($env:GITHUB_REF_TYPE -eq "tag") { $version = $env:GITHUB_REF_NAME.TrimStart("v") }
+          & ./scripts/windows/build.ps1 -Version $version -Target x86_64-pc-windows-msvc
+      - name: Show Windows build log
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path dist/build-windows.log) {
+            Get-Content dist/build-windows.log -Tail 80 | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          }
+      - name: Report Windows failure to issue
+        if: failure()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if (Test-Path dist/build-windows.log) {
+            $body = (Get-Content dist/build-windows.log -Tail 200) -join "`n"
+            $payload = @{ title = "Windows build failure $($env:GITHUB_SHA.Substring(0,7))"; body = $body } | ConvertTo-Json -Compress
+            Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/issues" -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = "application/vnd.github+json" } -Body $payload -ContentType "application/json" | Out-Null
+          }
+
+      - name: Report Windows failure
+        if: failure()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if (Test-Path dist/build-windows.log) {
+            $body = (Get-Content dist/build-windows.log -Tail 200) -join "`n"
+            $payload = @{ body = $body } | ConvertTo-Json -Compress
+            Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/commits/$env:GITHUB_SHA/comments" -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = "application/vnd.github+json" } -Body $payload -ContentType "application/json" | Out-Null
+          }
+
+      - name: Upload Windows diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenrecorder-windows-log
+          path: dist/build-windows.log
+          if-no-files-found: ignore
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenrecorder-windows
+          path: |
+            dist/*.exe
+            dist/*.zip
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install native deps
+        run: |
+          brew install cmake llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+      - name: Reset sherpa native cache
+        shell: bash
+        run: rm -rf target/sherpa-onnx-prebuilt
+      - name: Build macOS app
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then VERSION="4.0.0-alpha.3"; fi
+          APP_VERSION="$VERSION" bash scripts/macos/build.sh
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenrecorder-macos
+          path: |
+            dist/*.zip
+            dist/*.dmg
+          if-no-files-found: error
+
+  publish:
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'v4.0.0-alpha.3-ci' }}
+          name: ${{ github.ref_type == 'tag' && github.ref_name || 'Screen Recorder 4.0 alpha CI' }}
+          prerelease: ${{ github.ref_type != 'tag' }}
+          files: artifacts/*
+          generate_release_notes: true

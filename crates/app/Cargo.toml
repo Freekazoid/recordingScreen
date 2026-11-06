@@ -1,0 +1,32 @@
+[package]
+name = "screenrecorder-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "screenrecorder"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+eframe.workspace = true
+image.workspace = true
+screenrecorder-adapters = { path = "../adapters" }
+screenrecorder-application = { path = "../application" }
+screenrecorder-ui = { path = "../ui" }
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+screenrecorder-ml-worker = { path = "../ml-worker" }
+
+[features]
+default = []
+cuda = ["screenrecorder-ml-worker/cuda"]
+
+[build-dependencies]
+winresource = "0.1"

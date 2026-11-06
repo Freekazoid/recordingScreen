@@ -1,0 +1,557 @@
+//! Менеджер моделей: скачивание GGML/ONNX-файлов с докачкой.
+//!
+//! Модели лежат в `<data>/models/<model>/<file>`. Прерванная загрузка
+//! сохраняется в `.part` и продолжается по HTTP Range.
+
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+
+/// Ошибки скачивания моделей.
+#[derive(Debug, Error)]
+pub enum ModelError {
+    #[error("неизвестная модель: {0}")]
+    UnknownModel(String),
+
+    #[error("ошибка сети: {0}")]
+    Http(String),
+
+    #[error("ошибка файла {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("контрольная сумма {path}: ожидалось {expected}, получено {actual}")]
+    Checksum {
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
+}
+
+/// Один файл модели.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelFile {
+    pub url: &'static str,
+    pub file_name: &'static str,
+    pub size: u64,
+    pub sha256: &'static str,
+}
+
+/// Описание модели.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelSpec {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub files: &'static [ModelFile],
+}
+
+/// Доступные модели.
+pub const MODELS: &[ModelSpec] = &[
+    ModelSpec {
+        id: "whisper",
+        title: "Whisper large-v3-turbo",
+        files: &[ModelFile {
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
+            file_name: "ggml-large-v3-turbo-q5_0.bin",
+            size: 574_041_195,
+            sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+        }],
+    },
+    ModelSpec {
+        id: "diarization",
+        title: "Диаризация sherpa-onnx",
+        files: &[
+            ModelFile {
+                url: "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
+                file_name: "segmentation.onnx",
+                size: 5_992_913,
+                sha256: "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+            },
+            ModelFile {
+                url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+                file_name: "embedding.onnx",
+                size: 39_593_761,
+                sha256: "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
+            },
+        ],
+    },
+    ModelSpec {
+        id: "nemo",
+        title: "NeMo Sortformer",
+        files: &[ModelFile {
+            url: "https://huggingface.co/altunenes/parakeet-rs/resolve/main/nemotron-3-diarization/nemotron3_diar_v3.onnx",
+            file_name: "nemotron3_diar_v3.onnx",
+            size: 402_167_515,
+            sha256: "c32d6056f1ca52bdd50a74e1e7c66d91e5147bc29f19ffa4c39cbe5452397d15",
+        }],
+    },
+    ModelSpec {
+        id: "vad",
+        title: "Silero VAD (GGML)",
+        files: &[ModelFile {
+            url: "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin",
+            file_name: "ggml-silero-v5.1.2.bin",
+            size: 885_098,
+            sha256: "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf",
+        }],
+    },
+];
+
+/// Имена файлов-маркеров, по которым узнаём корень моделей.
+const WHISPER_MARKER: &str = "whisper/ggml-large-v3-turbo-q5_0.bin";
+const VAD_MARKER: &str = "vad/ggml-silero-v5.1.2.bin";
+const SEGMENTATION_MARKER: &str = "diarization/segmentation.onnx";
+const EMBEDDING_MARKER: &str = "diarization/embedding.onnx";
+const NEMO_MARKER: &str = "nemo/nemotron3_diar_v3.onnx";
+
+/// Считает, сколько известных моделей лежит прямо в каталоге.
+fn layout_score(root: &Path) -> usize {
+    let mut score = 0;
+    if root.join(WHISPER_MARKER).is_file() {
+        score += 1;
+    }
+    if root.join(VAD_MARKER).is_file() {
+        score += 1;
+    }
+    if root.join(SEGMENTATION_MARKER).is_file() && root.join(EMBEDDING_MARKER).is_file() {
+        score += 1;
+    }
+    if root.join(NEMO_MARKER).is_file() {
+        score += 1;
+    }
+    score
+}
+
+/// Превращает настройку «Папка моделей» в фактический корень моделей.
+///
+/// Пользователь может указать:
+/// - родительский каталог — модели лежат в `<папка>/models` (канонично);
+/// - сам корень моделей — тогда используем его как есть;
+/// - старую раскладку `<папка>/model`.
+///
+/// Если в выбранной папке уже есть модели, повторно их не качаем. Пустая
+/// настройка означает каталог по умолчанию (`<data>/models`).
+pub fn resolve_models_root(models_dir: &str, default_root: &Path) -> PathBuf {
+    let setting = models_dir.trim();
+    if setting.is_empty() {
+        return default_root.to_path_buf();
+    }
+    let base = PathBuf::from(setting);
+    let mut best = base.join("models");
+    let mut best_score = layout_score(&best);
+    for candidate in [base.clone(), base.join("model")] {
+        let score = layout_score(&candidate);
+        if score > best_score {
+            best = candidate;
+            best_score = score;
+        }
+    }
+    best
+}
+
+/// Прогресс загрузки.
+#[derive(Debug, Clone)]
+pub struct DownloadProgress {
+    pub model_id: String,
+    pub file: String,
+    pub downloaded: u64,
+    pub total: u64,
+    pub percent: f32,
+}
+
+/// Менеджер моделей в каталоге данных приложения.
+#[derive(Debug, Clone)]
+pub struct ModelManager {
+    root: PathBuf,
+}
+
+impl ModelManager {
+    /// Создаёт менеджер для каталога моделей.
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// Возвращает описание модели по идентификатору.
+    pub fn spec(id: &str) -> Option<&'static ModelSpec> {
+        MODELS.iter().find(|spec| spec.id == id)
+    }
+
+    /// Проверяет, что все файлы модели уже скачаны.
+    pub fn is_downloaded(&self, id: &str) -> bool {
+        let Some(spec) = Self::spec(id) else {
+            return false;
+        };
+        spec.files.iter().all(|file| {
+            let path = self.file_path(spec, file);
+            fs::metadata(path)
+                .map(|metadata| metadata.len() == file.size)
+                .unwrap_or(false)
+        })
+    }
+
+    /// Проверяет, что часть файлов модели уже есть (докачка).
+    pub fn is_partial(&self, id: &str) -> bool {
+        if self.is_downloaded(id) {
+            return false;
+        }
+        let Some(spec) = Self::spec(id) else {
+            return false;
+        };
+        spec.files.iter().any(|file| {
+            let path = self.file_path(spec, file);
+            fs::metadata(&path)
+                .map(|metadata| metadata.len() > 0)
+                .unwrap_or(false)
+        })
+    }
+
+    /// Скачивает модель и сообщает прогресс через callback.
+    pub fn download(
+        &self,
+        id: &str,
+        mut progress: impl FnMut(DownloadProgress),
+    ) -> Result<(), ModelError> {
+        let spec = Self::spec(id).ok_or_else(|| ModelError::UnknownModel(id.to_string()))?;
+        let total: u64 = spec.files.iter().map(|file| file.size).sum();
+        let mut done: u64 = 0;
+
+        for file in spec.files {
+            let path = self.file_path(spec, file);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|source| ModelError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            if path.exists() {
+                if verify_sha256(&path, file.sha256).is_ok() {
+                    done += file.size;
+                    continue;
+                }
+                let _ = fs::remove_file(&path);
+            }
+
+            let part = path.with_extension(format!(
+                "{}.part",
+                path.extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("download")
+            ));
+            let offset = fs::metadata(&part).map(|meta| meta.len()).unwrap_or(0);
+            if offset >= file.size && file.size > 0 {
+                fs::rename(&part, &path).map_err(|source| ModelError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+                verify_sha256(&path, file.sha256)?;
+                done += file.size;
+                continue;
+            }
+
+            let mut request = ureq::get(file.url);
+            if offset > 0 {
+                request = request.set("Range", &format!("bytes={offset}-"));
+            }
+            let response = request
+                .call()
+                .map_err(|error| ModelError::Http(error.to_string()))?;
+            let status = response.status();
+            let append = offset > 0 && status == 206;
+            let mut output = if append {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&part)
+                    .map_err(|source| ModelError::Io {
+                        path: part.clone(),
+                        source,
+                    })?
+            } else {
+                fs::File::create(&part).map_err(|source| ModelError::Io {
+                    path: part.clone(),
+                    source,
+                })?
+            };
+
+            let mut reader = response.into_reader();
+            let mut buffer = [0u8; 64 * 1024];
+            let mut current = if append { offset } else { 0 };
+            loop {
+                let read = reader.read(&mut buffer).map_err(|source| ModelError::Io {
+                    path: part.clone(),
+                    source,
+                })?;
+                if read == 0 {
+                    break;
+                }
+                output
+                    .write_all(&buffer[..read])
+                    .map_err(|source| ModelError::Io {
+                        path: part.clone(),
+                        source,
+                    })?;
+                current += read as u64;
+                progress(DownloadProgress {
+                    model_id: spec.id.to_string(),
+                    file: file.file_name.to_string(),
+                    downloaded: done + current,
+                    total,
+                    percent: if total == 0 {
+                        0.0
+                    } else {
+                        (done + current) as f32 / total as f32 * 100.0
+                    },
+                });
+            }
+            output.flush().map_err(|source| ModelError::Io {
+                path: part.clone(),
+                source,
+            })?;
+            drop(output);
+            fs::rename(&part, &path).map_err(|source| ModelError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            verify_sha256(&path, file.sha256)?;
+            done += file.size;
+        }
+
+        Ok(())
+    }
+
+    /// Удаляет файлы модели и освобождает каталог.
+    pub fn delete(&self, id: &str) -> Result<(), ModelError> {
+        let spec = Self::spec(id).ok_or_else(|| ModelError::UnknownModel(id.to_string()))?;
+        for file in spec.files {
+            let path = self.file_path(spec, file);
+            if path.exists() {
+                fs::remove_file(&path).map_err(|source| ModelError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+            }
+            let part = path.with_extension(format!(
+                "{}.part",
+                path.extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("download")
+            ));
+            if part.exists() {
+                let _ = fs::remove_file(part);
+            }
+        }
+        let dir = self.root.join(spec.id);
+        let _ = fs::remove_dir(dir);
+        Ok(())
+    }
+
+    /// Возвращает суммарный размер файлов модели на диске.
+    pub fn size(&self, id: &str) -> u64 {
+        let Some(spec) = Self::spec(id) else {
+            return 0;
+        };
+        spec.files
+            .iter()
+            .map(|file| {
+                fs::metadata(self.file_path(spec, file))
+                    .map(|meta| meta.len())
+                    .unwrap_or(file.size)
+            })
+            .sum()
+    }
+
+    /// Проверяет SHA256 файла модели.
+    pub fn verify(&self, id: &str) -> Result<(), ModelError> {
+        let spec = Self::spec(id).ok_or_else(|| ModelError::UnknownModel(id.to_string()))?;
+        for file in spec.files {
+            let path = self.file_path(spec, file);
+            verify_sha256(&path, file.sha256)?;
+        }
+        Ok(())
+    }
+
+    /// Путь к файлу модели.
+    fn file_path(&self, spec: &ModelSpec, file: &ModelFile) -> PathBuf {
+        self.root.join(spec.id).join(file.file_name)
+    }
+}
+
+/// Считает SHA256 и сравнивает с ожидаемым.
+fn verify_sha256(path: &Path, expected: &str) -> Result<(), ModelError> {
+    let mut file = fs::File::open(path).map_err(|source| ModelError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|source| ModelError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    let actual: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    if actual != expected {
+        return Err(ModelError::Checksum {
+            path: path.to_path_buf(),
+            expected: expected.to_string(),
+            actual,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Проверяет, что неизвестная модель не считается скачанной.
+    #[test]
+    fn unknown_model_is_not_downloaded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ModelManager::new(dir.path());
+        assert!(!manager.is_downloaded("unknown"));
+    }
+
+    /// Проверяет определение готовности по файлам.
+    #[test]
+    fn detects_downloaded_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ModelManager::new(dir.path());
+        let spec = ModelManager::spec("vad").expect("vad");
+        let path = manager.file_path(spec, &spec.files[0]);
+        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        let file = fs::File::create(&path).expect("create");
+        file.set_len(spec.files[0].size).expect("size");
+        assert!(manager.is_downloaded("vad"));
+    }
+
+    /// Проверяет совпадение и несовпадение SHA256.
+    #[test]
+    fn verifies_sha256() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test.bin");
+        fs::write(&path, b"test").expect("write");
+        verify_sha256(
+            &path,
+            "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        )
+        .expect("hash");
+        assert!(verify_sha256(&path, "00").is_err());
+    }
+
+    /// Проверяет удаление файлов модели.
+    #[test]
+    fn deletes_model_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ModelManager::new(dir.path());
+        let spec = ModelManager::spec("vad").expect("vad");
+        let path = manager.file_path(spec, &spec.files[0]);
+        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        fs::write(&path, b"test").expect("write");
+        manager.delete("vad").expect("delete");
+        assert!(!path.exists());
+    }
+
+    /// Реальное скачивание маленькой VAD-модели; запускать вручную.
+    #[test]
+    #[ignore = "требует сеть"]
+    fn downloads_vad_model() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ModelManager::new(dir.path());
+        manager.download("vad", |_| {}).expect("скачивание");
+        assert!(manager.is_downloaded("vad"));
+    }
+}
+
+#[cfg(test)]
+mod models_dir_tests {
+    use super::*;
+
+    /// Создаёт пустой файл-маркер вместе с родительскими каталогами.
+    fn touch(root: &Path, relative: &str) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("каталог");
+        std::fs::write(path, b"x").expect("файл");
+    }
+
+    /// Проверяет каноничную раскладку `<папка>/models`.
+    #[test]
+    fn resolves_canonical_models_dir() {
+        let temp = tempfile::tempdir().expect("temp");
+        touch(temp.path(), "models/vad/ggml-silero-v5.1.2.bin");
+        let root = resolve_models_root(
+            temp.path().to_str().expect("utf8"),
+            Path::new("/default/models"),
+        );
+        assert_eq!(root, temp.path().join("models"));
+    }
+
+    /// Проверяет, что пользователь может указать сам корень моделей.
+    #[test]
+    fn resolves_direct_root() {
+        let temp = tempfile::tempdir().expect("temp");
+        touch(temp.path(), "whisper/ggml-large-v3-turbo-q5_0.bin");
+        let root = resolve_models_root(
+            temp.path().to_str().expect("utf8"),
+            Path::new("/default/models"),
+        );
+        assert_eq!(root, temp.path());
+    }
+
+    /// Проверяет старую раскладку `<папка>/model`.
+    #[test]
+    fn resolves_legacy_model_dir() {
+        let temp = tempfile::tempdir().expect("temp");
+        touch(temp.path(), "model/nemo/nemotron3_diar_v3.onnx");
+        let root = resolve_models_root(
+            temp.path().to_str().expect("utf8"),
+            Path::new("/default/models"),
+        );
+        assert_eq!(root, temp.path().join("model"));
+    }
+
+    /// Создаёт файл нужного размера (разреженный), не занимая диск.
+    fn touch_sized(root: &Path, relative: &str, size: u64) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("каталог");
+        let file = std::fs::File::create(&path).expect("файл");
+        file.set_len(size).expect("размер");
+    }
+
+    /// Проверяет, что недокачанная и неверная по размеру модель не считается готовой.
+    #[test]
+    fn detects_partial_model() {
+        let temp = tempfile::tempdir().expect("temp");
+        let manager = ModelManager::new(temp.path());
+        assert!(!manager.is_partial("diarization"));
+        touch(temp.path(), "diarization/segmentation.onnx");
+        assert!(manager.is_partial("diarization"));
+        assert!(!manager.is_downloaded("diarization"));
+
+        touch_sized(temp.path(), "diarization/segmentation.onnx", 5_992_913);
+        touch_sized(temp.path(), "diarization/embedding.onnx", 39_593_761);
+        assert!(manager.is_downloaded("diarization"));
+        assert!(!manager.is_partial("diarization"));
+
+        touch_sized(temp.path(), "diarization/embedding.onnx", 1);
+        assert!(!manager.is_downloaded("diarization"));
+        assert!(manager.is_partial("diarization"));
+    }
+
+    /// Пустая настройка ведёт в каталог по умолчанию.
+    #[test]
+    fn resolves_default_for_empty_setting() {
+        let root = resolve_models_root("", Path::new("/default/models"));
+        assert_eq!(root, Path::new("/default/models"));
+    }
+}
