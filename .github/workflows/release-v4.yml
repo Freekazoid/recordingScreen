@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   APP_VERSION: 4.0.0-alpha.1
@@ -106,3 +106,21 @@ jobs:
             dist/*.zip
             dist/*.dmg
           if-no-files-found: error
+
+  publish:
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'v4.0.0-alpha.1-ci' }}
+          name: ${{ github.ref_type == 'tag' && github.ref_name || 'Screen Recorder 4.0 alpha CI' }}
+          prerelease: ${{ github.ref_type != 'tag' }}
+          files: artifacts/*
+          generate_release_notes: true

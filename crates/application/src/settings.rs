@@ -753,7 +753,10 @@ mod tests {
         assert_eq!(settings.export.format, "mkv");
         assert_eq!(settings.export.video_quality, "Отличное (CRF 18)");
         assert_eq!(settings.export.audio_mode, "Без пережатия");
-        assert_eq!(settings.models_dir, "/tmp/legacy/models");
+        assert_eq!(
+            settings.models_dir,
+            Path::new("/tmp/legacy").join("models").to_string_lossy()
+        );
         assert_eq!(settings.output_dir, "/tmp/output");
     }
 
