@@ -455,32 +455,33 @@ impl ScreenRecorderApp {
             #[cfg(target_os = "linux")]
             hotkey_parent_sent: false,
         };
-        if daemon {
-            // На macOS трей и глобальные клавиши создаются внутри
-            // NSApplication-run-loop сервиса (см. daemon.rs).
-            #[cfg(not(target_os = "macos"))]
-            {
+        // На macOS трей и глобальные клавиши создаются внутри
+        // NSApplication-run-loop сервиса (см. daemon.rs), поэтому ветка
+        // целиком исключена.
+        #[cfg(not(target_os = "macos"))]
+        {
+            if daemon {
                 app.init_tray();
                 app.init_hotkeys();
-            }
-        } else {
-            #[cfg(target_os = "linux")]
-            std::thread::spawn(|| {
-                // Окно уже создано eframe. Убираем кнопку maximize через
-                // Motif hints; Mutter перечитывает их при повторном map.
-                let pid = std::process::id();
-                for _ in 0..10 {
-                    match x11_activation::disable_maximize(pid) {
-                        Ok(true) => return,
-                        Ok(false) => {}
-                        Err(error) => {
-                            tracing::warn!(%error, "не удалось убрать кнопку maximize");
-                            return;
+            } else {
+                #[cfg(target_os = "linux")]
+                std::thread::spawn(|| {
+                    // Окно уже создано eframe. Убираем кнопку maximize через
+                    // Motif hints; Mutter перечитывает их при повторном map.
+                    let pid = std::process::id();
+                    for _ in 0..10 {
+                        match x11_activation::disable_maximize(pid) {
+                            Ok(true) => return,
+                            Ok(false) => {}
+                            Err(error) => {
+                                tracing::warn!(%error, "не удалось убрать кнопку maximize");
+                                return;
+                            }
                         }
+                        std::thread::sleep(Duration::from_millis(200));
                     }
-                    std::thread::sleep(Duration::from_millis(200));
-                }
-            });
+                });
+            }
         }
         app
     }
