@@ -9,10 +9,24 @@ $root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $dist = Join-Path $root "dist\windows"
 $out = Join-Path $root "dist"
 New-Item -ItemType Directory -Force $dist, $out | Out-Null
+$log = Join-Path $out "build-windows.log"
+function Fail-Message([string]$message) {
+  $escaped = $message.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+  Write-Output "::error::$escaped"
+}
+trap {
+  Fail-Message $_.Exception.Message
+  exit 1
+}
 
 Push-Location $root
 try {
-  cargo build --release --target $Target -p screenrecorder-app -p screenrecorder-ml-worker -p screenrecorder-diarize
+  & cargo build --release --target $Target -p screenrecorder-app -p screenrecorder-ml-worker -p screenrecorder-diarize 2>&1 |
+    Tee-Object -FilePath $log
+  if ($LASTEXITCODE -ne 0) {
+    $tail = (Get-Content $log -Tail 25) -join " | "
+    throw "cargo build failed ($LASTEXITCODE): $tail"
+  }
   $bin = Join-Path $root "target\$Target\release"
   Copy-Item (Join-Path $bin "screenrecorder.exe") $dist -Force
   Copy-Item (Join-Path $bin "screenrecorder-ml.exe") $dist -Force
@@ -48,7 +62,12 @@ screenrecorder-diarize.exe (sherpa-onnx) и DLL sherpa/onnxruntime.
   $portable = Join-Path $out "ScreenRecorder-$Version-win64-portable.zip"
   if (Test-Path $portable) { Remove-Item $portable -Force }
   Compress-Archive -Path (Join-Path $dist "*") -DestinationPath $portable
-  & makensis /DAPP_VERSION=$Version /DPAYLOAD="$dist" /DOUTDIR="$out" (Join-Path $PSScriptRoot "installer.nsi")
+  & makensis /DAPP_VERSION=$Version /DPAYLOAD="$dist" /DOUTDIR="$out" (Join-Path $PSScriptRoot "installer.nsi") 2>&1 |
+    Tee-Object -FilePath $log -Append
+  if ($LASTEXITCODE -ne 0) {
+    $tail = (Get-Content $log -Tail 25) -join " | "
+    throw "makensis failed ($LASTEXITCODE): $tail"
+  }
   Write-Host "Готово: $out"
 } finally {
   Pop-Location
