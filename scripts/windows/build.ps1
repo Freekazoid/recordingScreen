@@ -74,11 +74,17 @@ screenrecorder-diarize.exe (sherpa-onnx) и DLL sherpa/onnxruntime.
   $portable = Join-Path $out "ScreenRecorder-$Version-win64-portable.zip"
   if (Test-Path $portable) { Remove-Item $portable -Force }
   Compress-Archive -Path (Join-Path $dist "*") -DestinationPath $portable
+  $base = ($Version -split '-')[0]
+  $parts = $base.Split('.')
+  while ($parts.Count -lt 3) { $parts += '0' }
+  $suffix = if ($Version -match '\.(\d+)$') { $Matches[1] } else { '0' }
+  $numericVersion = "$($parts[0]).$($parts[1]).$($parts[2]).$suffix"
   $makensis = (Get-Command makensis).Source
   $installer = Join-Path $PSScriptRoot "installer.nsi"
   $nsisErr = "$log.nsis.err"
   $process = Start-Process -FilePath $makensis -ArgumentList @(
-    "/DAPP_VERSION=$Version", "/DPAYLOAD=$dist", "/DOUTDIR=$out", $installer
+    "/DAPP_VERSION=$Version", "/DAPP_VERSION_NUMERIC=$numericVersion",
+    "/DPAYLOAD=$dist", "/DOUTDIR=$out", $installer
   ) -NoNewWindow -Wait -PassThru `
     -RedirectStandardOutput "$log.nsis" -RedirectStandardError $nsisErr
   Get-Content "$log.nsis" | Out-File -Append $log

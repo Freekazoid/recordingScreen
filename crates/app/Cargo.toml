@@ -27,3 +27,6 @@ screenrecorder-ml-worker = { path = "../ml-worker" }
 [features]
 default = []
 cuda = ["screenrecorder-ml-worker/cuda"]
+
+[build-dependencies]
+winresource = "0.1"

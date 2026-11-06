@@ -120,7 +120,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSScreenCaptureUsageDescription</key><string>Screen Recorder записывает экран для создания видео.</string>
   <key>NSMicrophoneUsageDescription</key><string>Screen Recorder записывает микрофон для озвучивания записи.</string>
   <key>NSAudioCaptureUsageDescription</key><string>Screen Recorder записывает системный звук.</string>
-  <key>NSHumanReadableCopyright</key><string>Freekazoid</string>
+  <key>NSHumanReadableCopyright</key><string>© 2026 Freekazoid</string>
 </dict>
 </plist>
 PLIST

@@ -2,6 +2,9 @@
 !ifndef APP_VERSION
   !define APP_VERSION "4.0.0-alpha.3"
 !endif
+!ifndef APP_VERSION_NUMERIC
+  !define APP_VERSION_NUMERIC "4.0.0.3"
+!endif
 !ifndef PAYLOAD
   !define PAYLOAD "..\..\dist\windows"
 !endif
@@ -20,6 +23,13 @@ InstallDirRegKey HKCU "Software\ScreenRecorder" "InstallDir"
 RequestExecutionLevel user
 Unicode true
 SetCompressor /SOLID lzma
+VIProductVersion "${APP_VERSION_NUMERIC}"
+VIAddVersionKey /LANG=1033 "ProductName" "${APP_NAME}"
+VIAddVersionKey /LANG=1033 "CompanyName" "Freekazoid"
+VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 Freekazoid"
+VIAddVersionKey /LANG=1033 "FileDescription" "Screen Recorder installer"
+VIAddVersionKey /LANG=1033 "FileVersion" "${APP_VERSION}"
+VIAddVersionKey /LANG=1033 "ProductVersion" "${APP_VERSION}"
 Icon "${ICON}"
 UninstallIcon "${ICON}"
 ShowInstDetails show
@@ -42,7 +52,10 @@ Section "Установить Screen Recorder" SEC_MAIN
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ScreenRecorder" "DisplayName" "${APP_NAME}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ScreenRecorder" "DisplayVersion" "${APP_VERSION}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ScreenRecorder" "Publisher" "Freekazoid"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ScreenRecorder" "DisplayIcon" "$INSTDIR\icon.ico"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ScreenRecorder" "DisplayIcon" "$INSTDIR\screenrecorder.exe,0"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ScreenRecorder" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ScreenRecorder" "URLInfoAbout" "https://github.com/Freekazoid/recordingScreen"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ScreenRecorder" "HelpLink" "https://github.com/Freekazoid/recordingScreen/issues"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ScreenRecorder" "UninstallString" "$INSTDIR\uninstall.exe"
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ScreenRecorder" "NoModify" 1
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ScreenRecorder" "NoRepair" 1
