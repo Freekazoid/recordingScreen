@@ -9,7 +9,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-VERSION="${APP_VERSION:-${1:-4.0.0-alpha.1}}"
+VERSION="${APP_VERSION:-${1:-4.0.0-alpha.2}}"
 ARCH="${MACOS_TARGET_ARCH:-$(uname -m)}"
 OUT="$ROOT/dist"
 APP="$OUT/ScreenRecorder.app"

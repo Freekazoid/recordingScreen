@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-VERSION="${1:-4.0.0-alpha.1}"
+VERSION="${1:-4.0.0-alpha.2}"
 OUT="$ROOT/dist"
 APPDIR="$OUT/ScreenRecorder.AppDir"
 PKGROOT="$OUT/deb-root"

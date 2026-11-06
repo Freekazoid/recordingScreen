@@ -1,7 +1,7 @@
 ﻿# Собирает Windows-комплект v4 и установщик NSIS.
 # Требования: Rust GNU toolchain, MinGW (gcc/g++), NSIS (makensis), CMake.
 param(
-  [string]$Version = "4.0.0-alpha.1",
+  [string]$Version = "4.0.0-alpha.2",
   [string]$Target = "x86_64-pc-windows-gnu"
 )
 $ErrorActionPreference = "Stop"

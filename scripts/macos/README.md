@@ -10,10 +10,10 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin
 # (для ffmpeg/ASR нужны CMake и clang из Xcode Command Line Tools)
 
 # Apple Silicon
-MACOS_TARGET_ARCH=arm64 APP_VERSION=4.0.0-alpha.1 bash scripts/macos/build.sh
+MACOS_TARGET_ARCH=arm64 APP_VERSION=4.0.0-alpha.2 bash scripts/macos/build.sh
 
 # Universal2 (собирает оба target и склеивает lipo)
-MACOS_TARGET_ARCH=universal2 APP_VERSION=4.0.0-alpha.1 bash scripts/macos/build.sh
+MACOS_TARGET_ARCH=universal2 APP_VERSION=4.0.0-alpha.2 bash scripts/macos/build.sh
 
 # опционально DMG и подпись
 CREATE_DMG=1 MACOS_SIGN_IDENTITY="Developer ID Application: ..." \

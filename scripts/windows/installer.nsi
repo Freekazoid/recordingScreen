@@ -1,6 +1,6 @@
 ; Установщик Screen Recorder 4 для Windows (NSIS 3, per-user).
 !ifndef APP_VERSION
-  !define APP_VERSION "4.0.0-alpha.1"
+  !define APP_VERSION "4.0.0-alpha.2"
 !endif
 !ifndef PAYLOAD
   !define PAYLOAD "..\..\dist\windows"

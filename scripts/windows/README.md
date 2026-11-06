@@ -4,7 +4,7 @@
 
 ```powershell
 # из корня репозитория
-powershell -ExecutionPolicy Bypass -File scripts/windows/build.ps1 -Version 4.0.0-alpha.1
+powershell -ExecutionPolicy Bypass -File scripts/windows/build.ps1 -Version 4.0.0-alpha.2
 ```
 
 Скрипт собирает `screenrecorder.exe`, `screenrecorder-ml.exe`,
