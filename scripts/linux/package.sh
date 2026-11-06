@@ -8,8 +8,30 @@ OUT="$ROOT/dist"
 APPDIR="$OUT/ScreenRecorder.AppDir"
 PKGROOT="$OUT/deb-root"
 ARCH="amd64"
+APPIMAGE_ARCH="x86_64"
 
 cd "$ROOT"
+
+# В CI исходники не содержат больших бинарников; скачиваем их при сборке.
+if [[ ! -x bin/linux/ffmpeg || ! -x bin/linux/ffprobe ]]; then
+  echo "[build] downloading static ffmpeg for Linux..."
+  mkdir -p bin/linux /tmp/ffmpeg-linux
+  curl -L --fail --retry 3     -o /tmp/ffmpeg-linux/ffmpeg.tar.xz \
+    "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+  tar -xJf /tmp/ffmpeg-linux/ffmpeg.tar.xz -C /tmp/ffmpeg-linux --strip-components=1
+  install -m755 /tmp/ffmpeg-linux/ffmpeg bin/linux/ffmpeg
+  install -m755 /tmp/ffmpeg-linux/ffprobe bin/linux/ffprobe
+fi
+
+APPIMAGETOOL="${APPIMAGETOOL:-$ROOT/tools/appimagetool-x86_64.AppImage}"
+if [[ ! -x "$APPIMAGETOOL" ]]; then
+  echo "[build] downloading appimagetool..."
+  mkdir -p "$ROOT/tools"
+  curl -L --fail --retry 3 -o "$APPIMAGETOOL" \
+    "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+  chmod +x "$APPIMAGETOOL"
+fi
+
 cargo build --release -p screenrecorder-app -p screenrecorder-ml-worker -p screenrecorder-diarize
 
 rm -rf "$APPDIR" "$PKGROOT"
@@ -43,8 +65,9 @@ chmod +x "$APPDIR/AppRun"
 cp "$APPDIR/usr/share/applications/screenrecorder.desktop" "$APPDIR/"
 cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/screenrecorder.png" "$APPDIR/screenrecorder.png"
 
-ARCH="$ARCH" tools/appimagetool-x86_64.AppImage "$APPDIR" "$OUT/ScreenRecorder-$VERSION-x86_64.AppImage" \
-  || ARCH="$ARCH" tools/appimagetool-x86_64.AppImage --appimage-extract-and-run "$APPDIR" "$OUT/ScreenRecorder-$VERSION-x86_64.AppImage"
+if ! ARCH="$APPIMAGE_ARCH" "$APPIMAGETOOL" "$APPDIR" "$OUT/ScreenRecorder-$VERSION-$APPIMAGE_ARCH.AppImage"; then
+  ARCH="$APPIMAGE_ARCH" "$APPIMAGETOOL" --appimage-extract-and-run "$APPDIR" "$OUT/ScreenRecorder-$VERSION-$APPIMAGE_ARCH.AppImage"
+fi
 
 mkdir -p "$PKGROOT/DEBIAN" "$PKGROOT/usr/bin" "$PKGROOT/usr/share/applications" \
   "$PKGROOT/usr/share/icons/hicolor/256x256/apps"

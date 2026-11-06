@@ -1,0 +1,97 @@
+name: Release v4
+
+on:
+  push:
+    branches: [rewrite/v4]
+    tags: ['v4*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  APP_VERSION: 4.0.0-alpha.1
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            cmake clang libclang-dev pkg-config \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libxcb1-dev libgl1-mesa-dev
+      - name: Build Linux packages
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then VERSION="4.0.0-alpha.1"; fi
+          bash scripts/linux/package.sh "$VERSION"
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenrecorder-linux
+          path: |
+            dist/*.deb
+            dist/*.AppImage
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install native deps
+        shell: pwsh
+        run: |
+          choco install llvm cmake nsis -y --no-progress
+          "C:\Program Files\LLVM\bin" | Out-File -Append $env:GITHUB_PATH
+          "C:\Program Files (x86)\NSIS" | Out-File -Append $env:GITHUB_PATH
+      - name: Build Windows packages
+        shell: pwsh
+        run: |
+          $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
+          $version = "4.0.0-alpha.1"
+          if ($env:GITHUB_REF_TYPE -eq "tag") { $version = $env:GITHUB_REF_NAME.TrimStart("v") }
+          powershell -ExecutionPolicy Bypass -File scripts/windows/build.ps1 -Version $version -Target x86_64-pc-windows-msvc
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenrecorder-windows
+          path: |
+            dist/*.exe
+            dist/*.zip
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - name: Install native deps
+        run: |
+          brew install cmake llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+      - name: Build macOS app
+        env:
+          MACOS_TARGET_ARCH: arm64
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then VERSION="4.0.0-alpha.1"; fi
+          APP_VERSION="$VERSION" bash scripts/macos/build.sh
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenrecorder-macos
+          path: |
+            dist/*.zip
+            dist/*.dmg
+          if-no-files-found: error

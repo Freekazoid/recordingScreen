@@ -45,6 +45,9 @@ Screen Recorder 4.0 (Windows)
 screenrecorder-diarize.exe (sherpa-onnx) и DLL sherpa/onnxruntime.
 "@ | Set-Content (Join-Path $dist "README-win.txt") -Encoding UTF8
 
+  $portable = Join-Path $out "ScreenRecorder-$Version-win64-portable.zip"
+  if (Test-Path $portable) { Remove-Item $portable -Force }
+  Compress-Archive -Path (Join-Path $dist "*") -DestinationPath $portable
   & makensis /DAPP_VERSION=$Version /DPAYLOAD="$dist" /DOUTDIR="$out" (Join-Path $PSScriptRoot "installer.nsi")
   Write-Host "Готово: $out"
 } finally {
