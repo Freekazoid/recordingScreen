@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 env:
   APP_VERSION: 4.0.0-alpha.1
@@ -67,6 +68,18 @@ jobs:
           if (Test-Path dist/build-windows.log) {
             Get-Content dist/build-windows.log -Tail 80 | Out-File -Append $env:GITHUB_STEP_SUMMARY
           }
+      - name: Report Windows failure to issue
+        if: failure()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if (Test-Path dist/build-windows.log) {
+            $body = (Get-Content dist/build-windows.log -Tail 200) -join "`n"
+            $payload = @{ title = "Windows build failure $($env:GITHUB_SHA.Substring(0,7))"; body = $body } | ConvertTo-Json -Compress
+            Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/issues" -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = "application/vnd.github+json" } -Body $payload -ContentType "application/json" | Out-Null
+          }
+
       - name: Report Windows failure
         if: failure()
         shell: pwsh
