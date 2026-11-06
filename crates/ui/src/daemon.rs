@@ -30,6 +30,7 @@ enum Event {
 }
 
 /// Запускает фоновый сервис до завершения.
+#[cfg_attr(target_os = "macos", allow(clippy::needless_return))]
 pub fn run_daemon(paths: Paths, settings: Settings) -> Result<(), String> {
     #[cfg(windows)]
     let _lock = match crate::win32::daemon_lock()? {
@@ -382,7 +383,7 @@ impl winit::application::ApplicationHandler for MacDaemon<'_> {
 
     /// Обслуживает IPC, запись и трей без окна.
     fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        drain_events(self.app, &self.events);
+        drain_events(self.app, self.events);
         if self.app.quit_requested {
             event_loop.exit();
             return;

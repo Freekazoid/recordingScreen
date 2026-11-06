@@ -5157,7 +5157,7 @@ pub fn run(paths: Paths, settings: Settings) -> Result<(), String> {
     let backend = preferred_ui_backend();
     tracing::info!(?backend, "бэкенд окна");
     let client = ipc::ensure_daemon(&paths)?;
-    #[cfg_attr(windows, allow(unused_mut))]
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([380.0, 660.0])
