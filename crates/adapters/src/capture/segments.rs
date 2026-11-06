@@ -52,7 +52,7 @@ pub fn concat_segments(output: &Path) -> Result<(), String> {
         content.push_str(&format!("file '{path}'\n"));
     }
     fs::write(&list, content).map_err(|error| format!("список сегментов: {error}"))?;
-    let result = Command::new("ffmpeg")
+    let result = Command::new(crate::media::ffmpeg_binary())
         .args([
             "-hide_banner",
             "-loglevel",
@@ -152,7 +152,7 @@ mod tests {
         std::fs::create_dir_all(&session).expect("mkdir");
         for index in 0..2 {
             let output = session.join(format!("screen-{index:03}.mkv"));
-            let status = Command::new("ffmpeg")
+            let status = Command::new(crate::media::ffmpeg_binary())
                 .args([
                     "-hide_banner",
                     "-loglevel",

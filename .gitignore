@@ -143,3 +143,4 @@ docs/
 # Local _tkinter build SDK
 .sdk/
 logs/
+.tavily/

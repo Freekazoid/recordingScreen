@@ -1,32 +1,37 @@
 //! Захват экрана и звука.
 //!
 //! Платформенные адаптеры скрыты за общими именами: на Linux это X11 и
-//! Wayland-портал, на Windows — ffmpeg `gdigrab`. Интерфейс `VideoRecorder`
-//! одинаков, поэтому UI не знает, какая ОС под ним.
+//! Wayland-портал, на Windows — ffmpeg `gdigrab`, на macOS — ffmpeg
+//! `avfoundation`. Интерфейс `VideoRecorder` одинаков, поэтому UI не знает,
+//! какая ОС под ним.
 
 pub mod segments;
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+pub mod macos;
+#[cfg(target_os = "linux")]
 pub mod screenshot;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub mod wayland;
 #[cfg(windows)]
 pub mod windows;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub mod x11;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod portal_token;
 
 pub use segments::{concat_segments, recover_all_segments, segment_pattern};
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+pub use macos::{MacVideoRecorder, list_windows, screenshot, take_screenshot};
+#[cfg(target_os = "linux")]
 pub use screenshot::take_screenshot;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub use wayland::WaylandPortalRecorder;
 #[cfg(windows)]
 pub use windows::{WindowsVideoRecorder, list_windows, screenshot, take_screenshot};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub use x11::{X11VideoRecorder, list_windows, screenshot};
 
 /// Что выбирает пользователь в портале Wayland.
@@ -77,31 +82,34 @@ pub struct Region {
 }
 
 /// Платформенный рекордер видео.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub type VideoRecorder = x11::X11VideoRecorder;
 /// Платформенный рекордер видео.
 #[cfg(windows)]
 pub type VideoRecorder = windows::WindowsVideoRecorder;
+/// Платформенный рекордер видео.
+#[cfg(target_os = "macos")]
+pub type VideoRecorder = macos::MacVideoRecorder;
 
-/// Заглушка Wayland-портала на Windows: путь выбирается только по
+/// Заглушка Wayland-портала на Windows/macOS: путь выбирается только по
 /// `WAYLAND_DISPLAY`, которого там нет, но тип нужен для общей UI-логики.
-#[cfg(windows)]
+#[cfg(not(target_os = "linux"))]
 #[derive(Debug, Default)]
 pub struct WaylandPortalRecorder;
 
-#[cfg(windows)]
+#[cfg(not(target_os = "linux"))]
 impl WaylandPortalRecorder {
     /// Создаёт заглушку.
     pub fn new() -> Self {
         Self
     }
 
-    /// Портал на Windows недоступен.
+    /// Портал недоступен на этой ОС.
     pub fn start(&mut self, _output: &std::path::Path, _fps: u32) -> Result<(), String> {
-        Err("Wayland-портал недоступен на Windows".to_string())
+        Err("Wayland-портал доступен только на Linux".to_string())
     }
 
-    /// Портал на Windows недоступен.
+    /// Портал недоступен на этой ОС.
     pub fn start_with_source(
         &mut self,
         _output: &std::path::Path,
@@ -109,7 +117,7 @@ impl WaylandPortalRecorder {
         _source: PortalSource,
         _crop: Option<Region>,
     ) -> Result<(), String> {
-        Err("Wayland-портал недоступен на Windows".to_string())
+        Err("Wayland-портал доступен только на Linux".to_string())
     }
 
     /// Всегда `false`: записи нет.

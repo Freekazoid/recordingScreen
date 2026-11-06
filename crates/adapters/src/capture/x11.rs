@@ -46,7 +46,7 @@ impl X11VideoRecorder {
 
         let display = display_name();
         let (width, height) = display_size();
-        let mut command = Command::new("ffmpeg");
+        let mut command = Command::new(crate::media::ffmpeg_binary());
         command
             .args(build_args(&display, (width, height), fps, output, region))
             .stdin(Stdio::null())
@@ -301,7 +301,7 @@ fn decode_xprop_escapes(value: &str) -> String {
 pub fn screenshot(output: &Path) -> Result<(), String> {
     let display = display_name();
     let (width, height) = display_size();
-    let status = Command::new("ffmpeg")
+    let status = Command::new(crate::media::ffmpeg_binary())
         .args([
             "-hide_banner",
             "-loglevel",

@@ -19,7 +19,7 @@ const FFMPEG_NICE: i32 = 10;
 /// заблокировать отрисовку окна. Пониженный приоритет оставляет CPU
 /// интерфейсу и compositor'у.
 fn ffmpeg_command(args: &[String]) -> Command {
-    let mut command = Command::new("ffmpeg");
+    let mut command = Command::new(crate::media::ffmpeg_binary());
     command.args(args);
     #[cfg(unix)]
     unsafe {
@@ -398,7 +398,7 @@ mod tests {
         let system = dir.path().join("system.wav");
         let mic = dir.path().join("mic.wav");
         let output = dir.path().join("out.mp4");
-        let status = Command::new("ffmpeg")
+        let status = Command::new(crate::media::ffmpeg_binary())
             .args([
                 "-hide_banner",
                 "-loglevel",
@@ -418,7 +418,7 @@ mod tests {
             .expect("video");
         assert!(status.success());
         for (path, frequency) in [(&system, "440"), (&mic, "660")] {
-            let status = Command::new("ffmpeg")
+            let status = Command::new(crate::media::ffmpeg_binary())
                 .args([
                     "-hide_banner",
                     "-loglevel",

@@ -5,14 +5,14 @@ pub mod capture;
 pub mod media;
 pub mod models;
 pub mod paths;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod portal;
 
 pub use audio::{
     AudioDevice, AudioDeviceKind, AudioError, AudioProbe, AudioRecorder, AudioStart,
     AudioTrackAnalysis, LinuxAudioRecorder, analyze_track, read_levels,
 };
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub use capture::X11VideoRecorder;
 pub use capture::{
     CaptureError, PORTAL_CANCELLED, PortalSource, Region, VideoRecorder, WaylandPortalRecorder,

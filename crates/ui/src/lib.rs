@@ -456,8 +456,13 @@ impl ScreenRecorderApp {
             hotkey_parent_sent: false,
         };
         if daemon {
-            app.init_tray();
-            app.init_hotkeys();
+            // На macOS трей и глобальные клавиши создаются внутри
+            // NSApplication-run-loop сервиса (см. daemon.rs).
+            #[cfg(not(target_os = "macos"))]
+            {
+                app.init_tray();
+                app.init_hotkeys();
+            }
         } else {
             #[cfg(target_os = "linux")]
             std::thread::spawn(|| {

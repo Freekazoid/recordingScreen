@@ -22,7 +22,7 @@ pub enum AudioError {
     #[error("запись уже запущена")]
     AlreadyRunning,
 
-    #[error("не найдены аудиоустройства (pw-dump/pactl)")]
+    #[error("не найдены аудиоустройства")]
     NoDevices,
 
     #[error("не удалось определить устройство {0}")]
@@ -322,9 +322,9 @@ fn resolve_target(target: Option<&str>, kind: AudioDeviceKind) -> Result<String,
 /// Иначе после `kill -9` сервиса процессы записи остаются сиротами и
 /// продолжают писать в старую сессию, занимая устройства.
 fn die_with_parent(command: &mut std::process::Command) {
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     let _ = command;
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     unsafe {
         use std::os::unix::process::CommandExt;
         command.pre_exec(|| {
@@ -593,7 +593,7 @@ pub fn analyze_track(path: &Path) -> Result<AudioTrackAnalysis, AudioError> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

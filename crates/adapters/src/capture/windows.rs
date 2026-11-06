@@ -54,7 +54,7 @@ impl WindowsVideoRecorder {
         let args = build_args(fps, output, region);
         let log_path = output.with_file_name("ffmpeg-video.log");
         let log = std::fs::File::create(&log_path).ok();
-        let mut command = Command::new("ffmpeg");
+        let mut command = Command::new(crate::media::ffmpeg_binary());
         command
             .args(args)
             .stdin(Stdio::piped())
@@ -247,7 +247,7 @@ unsafe extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
 
 /// Делает снимок всего экрана в PNG.
 pub fn screenshot(output: &Path) -> Result<(), String> {
-    let status = Command::new("ffmpeg")
+    let status = Command::new(crate::media::ffmpeg_binary())
         .args([
             "-hide_banner",
             "-loglevel",

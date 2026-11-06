@@ -10,7 +10,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 /// Без этого ML-воркер может пережить падение/перезапуск сервиса и
 /// продолжить занимать CPU и модели.
 fn die_with_parent(command: &mut Command) {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     unsafe {
         use std::os::unix::process::CommandExt;
         command.pre_exec(|| {
@@ -18,7 +18,7 @@ fn die_with_parent(command: &mut Command) {
             Ok(())
         });
     }
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = command;
     }

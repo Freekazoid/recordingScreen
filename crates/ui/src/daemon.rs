@@ -62,6 +62,15 @@ pub fn run_daemon(paths: Paths, settings: Settings) -> Result<(), String> {
     {
         app.daemon_token = Some(token);
     }
+    #[cfg(target_os = "macos")]
+    {
+        let mut app = app;
+        let result = run_macos_loop(&mut app, &events_rx);
+        let _ = std::fs::remove_file(&endpoint);
+        tracing::info!("сервис остановлен");
+        return result;
+    }
+
     let mut last_tick = Instant::now();
     let result = loop {
         drain_events(&mut app, &events_rx);
@@ -338,6 +347,58 @@ fn handle_request(app: &mut ScreenRecorderApp, request: Request) -> Response {
             Response::Ok
         }
     }
+}
+
+/// Запускает сервис внутри NSApplication-run-loop на macOS.
+///
+/// tray-icon и global-hotkey на macOS требуют нативного цикла приложения;
+/// обычный `loop { sleep }` не доставляет события меню/клавиш.
+#[cfg(target_os = "macos")]
+struct MacDaemon<'a> {
+    app: &'a mut ScreenRecorderApp,
+    events: &'a Receiver<Event>,
+    last_tick: Instant,
+}
+
+#[cfg(target_os = "macos")]
+impl winit::application::ApplicationHandler for MacDaemon<'_> {
+    /// Создаёт трей и клавиши после инициализации NSApplication.
+    fn resumed(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
+        self.app.init_tray();
+        self.app.init_hotkeys();
+    }
+
+    /// Обслуживает IPC, запись и трей без окна.
+    fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        drain_events(self.app, &self.events);
+        if self.app.quit_requested {
+            event_loop.exit();
+            return;
+        }
+        if self.last_tick.elapsed() >= Duration::from_millis(100) {
+            self.app.tick_daemon();
+            self.last_tick = Instant::now();
+        }
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+            Instant::now() + Duration::from_millis(20),
+        ));
+    }
+}
+
+/// Запускает macOS-run-loop сервиса.
+#[cfg(target_os = "macos")]
+fn run_macos_loop(app: &mut ScreenRecorderApp, events: &Receiver<Event>) -> Result<(), String> {
+    let event_loop = winit::event_loop::EventLoop::builder()
+        .build()
+        .map_err(|error| format!("event loop macOS: {error}"))?;
+    let mut daemon = MacDaemon {
+        app,
+        events,
+        last_tick: Instant::now(),
+    };
+    event_loop
+        .run_app(&mut daemon)
+        .map_err(|error| format!("run loop macOS: {error}"))
 }
 
 #[cfg(all(test, unix))]
