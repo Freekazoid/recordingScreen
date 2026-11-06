@@ -364,6 +364,7 @@ impl ScreenRecorderApp {
         let output_format = settings.export.format.clone();
         let video_quality = settings.export.video_quality.clone();
         let audio_track_mode = settings.export.audio_mode.clone();
+        #[allow(unused_mut)]
         let mut app = Self {
             paths,
             settings,

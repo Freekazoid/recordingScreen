@@ -57,6 +57,7 @@ pub fn run_daemon(paths: Paths, settings: Settings) -> Result<(), String> {
     let (events_tx, events_rx) = mpsc::channel();
     spawn_accept(listener, events_tx);
 
+    #[allow(unused_mut)]
     let mut app = ScreenRecorderApp::new_daemon(paths, settings);
     #[cfg(windows)]
     {
@@ -64,30 +65,32 @@ pub fn run_daemon(paths: Paths, settings: Settings) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        let mut app = app;
         let result = run_macos_loop(&mut app, &events_rx);
         let _ = std::fs::remove_file(&endpoint);
         tracing::info!("сервис остановлен");
         return result;
     }
 
-    let mut last_tick = Instant::now();
-    let result = loop {
-        drain_events(&mut app, &events_rx);
-        if app.quit_requested {
-            break Ok(());
-        }
-        #[cfg(windows)]
-        crate::win32::pump_messages();
-        if last_tick.elapsed() >= Duration::from_millis(100) {
-            app.tick_daemon();
-            last_tick = Instant::now();
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    let _ = std::fs::remove_file(&endpoint);
-    tracing::info!("сервис остановлен");
-    result
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut last_tick = Instant::now();
+        let result = loop {
+            drain_events(&mut app, &events_rx);
+            if app.quit_requested {
+                break Ok(());
+            }
+            #[cfg(windows)]
+            crate::win32::pump_messages();
+            if last_tick.elapsed() >= Duration::from_millis(100) {
+                app.tick_daemon();
+                last_tick = Instant::now();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let _ = std::fs::remove_file(&endpoint);
+        tracing::info!("сервис остановлен");
+        result
+    }
 }
 
 /// Создаёт Unix-сокет; `None`, если сервис уже обслуживает этот путь.
