@@ -70,6 +70,14 @@ jobs:
           fi
           exit "$code"
 
+      - name: Show clippy log
+        if: always()
+        shell: bash
+        run: |
+          if [ -f clippy.log ]; then
+            tail -n 80 clippy.log >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+
       - name: Test
         shell: bash
         run: |
