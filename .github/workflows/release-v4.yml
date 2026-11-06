@@ -59,7 +59,7 @@ jobs:
           $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
           $version = "4.0.0-alpha.1"
           if ($env:GITHUB_REF_TYPE -eq "tag") { $version = $env:GITHUB_REF_NAME.TrimStart("v") }
-          pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/windows/build.ps1 -Version $version -Target x86_64-pc-windows-msvc
+          & ./scripts/windows/build.ps1 -Version $version -Target x86_64-pc-windows-msvc
       - name: Show Windows build log
         if: always()
         shell: pwsh
