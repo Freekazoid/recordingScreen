@@ -56,6 +56,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
+        shell: bash
         run: |
           set +e
           cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee clippy.log
@@ -70,6 +71,7 @@ jobs:
           exit "$code"
 
       - name: Test
+        shell: bash
         run: |
           set +e
           cargo test --workspace 2>&1 | tee test.log
